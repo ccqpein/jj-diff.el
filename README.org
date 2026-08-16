@@ -1,0 +1,82 @@
+#+TITLE: jj-diff.el
+#+AUTHOR: ccQpein
+#+OPTIONS: toc:2
+
+An interactive Magit-like diff and hunk marking mode for [[https://github.com/martinvonz/jj][Jujutsu (jj)]] in Emacs.
+
+~jj-diff.el~ brings the intuitive visual interaction workflow of Magit to Jujutsu. It enables you to inspect repository changes, mark individual lines, regions, hunks, or files, and non-interactively split commits via ~jj split~ using Emacs itself as the backend diff editor—with *zero external script dependencies*.
+
+* Features
+
+- *Magit-inspired Diff Interface*: Clean, colorful diff buffer (~*jj-diff: <repo>*~) with distinct faces for file headers, hunk headers, additions, deletions, and marked lines.
+- *Line-level Patch Masking*: Mark/unmark individual lines, active regions, whole hunks, or entire files.
+- *Visual Feedback*: Distinct background highlighting + fringe indicators for marked changes.
+- *Automatic Root Discovery*: Discovers the nearest Jujutsu root when invoked from any nested subdirectory (like =/User/A/B/C/D= -> =/User/A=) and displays the repository-wide diff.
+- *Non-Interactive Split Commits*: Press ~c~ to open ~*jj-commit-description*~, write your message, and hit ~C-c C-c~. ~jj-diff~ drives ~jj split~ non-interactively using Emacs batch mode.
+- *Folding Support*: Collapse/expand hunks and files using ~TAB~ or ~RET~.
+- *Pure Emacs Engine*: No external helper scripts or wrapper binaries required; uses your active Emacs binary (~invocation-name~).
+
+* Installation
+
+Add ~jj-diff.el~ to your ~load-path~ and require it:
+
+#+BEGIN_SRC elisp
+;; In your init.el / config
+(add-to-list 'load-path "/path/to/jj-diff.el")
+(require 'jj-diff)
+#+END_SRC
+
+With ~use-package~ with ~straight.el~:
+
+#+BEGIN_SRC elisp
+  (use-package jj-diff
+    :straight (:host github :repo "ccqpein/jj-diff.el")
+    :bind (("C-c j d" . jj-diff)))
+#+END_SRC
+
+* Usage & Workflow
+
+1. *Open Diff*: Run =M-x jj-diff= inside any Jujutsu repository (or nested subdirectory; or provide a prefix argument =C-u M-x jj-diff= to specify a revision, which defaults to =@=).
+2. *Mark / Unmark*:
+   - ~m~ / ~s~: Toggle mark on line, active region, hunk, or file.
+   - ~u~: Unmark line, region, hunk, or file.
+   - ~M~ / ~S~: Mark all changes.
+   - ~U~: Unmark all changes.
+3. *Navigate & Fold*:
+   - ~n~ / ~p~: Jump to next / previous hunk.
+   - ~N~ / ~P~: Jump to next / previous file.
+   - ~TAB~ / ~RET~: Fold / unfold hunk or file.
+4. *Commit*:
+   - ~c~: Open commit description buffer (~*jj-commit-description*~).
+   - Type your commit message.
+   - ~C-c C-c~: Split and commit the marked changes.
+   - ~C-c C-k~: Cancel commit.
+5. *Other Commands*:
+   - ~g~: Refresh diff buffer.
+   - ~q~: Quit / bury buffer.
+   - ~?~: Describe mode / show keybindings.
+
+* Keybindings Reference
+
+| Key       | Command                  | Description                                         |
+|-----------+--------------------------+-----------------------------------------------------|
+| ~m~ / ~s~     | ~jj-diff-mark~             | Toggle marked state for line, region, hunk, or file |
+| ~u~         | ~jj-diff-unmark~           | Unmark line, region, hunk, or file                  |
+| ~M~ / ~S~     | ~jj-diff-mark-all~         | Mark all changes                                    |
+| ~U~         | ~jj-diff-unmark-all~       | Unmark all changes                                  |
+| ~TAB~ / ~RET~ | ~jj-diff-toggle-fold~      | Collapse / expand current hunk or file              |
+| ~S-TAB~     | ~jj-diff-toggle-all-folds~ | Collapse / expand all hunks in buffer (like Magit)  |
+| ~n~ / ~p~     | ~jj-diff-next-hunk~        | Move to next / previous hunk                        |
+| ~N~ / ~P~     | ~jj-diff-next-file~        | Move to next / previous file                        |
+| ~c~         | ~jj-diff-commit~           | Open commit description buffer                      |
+| ~g~         | ~jj-diff-refresh~          | Refresh working copy diff                           |
+| ~q~         | ~quit-window~              | Close diff buffer                                   |
+| ~?~         | ~describe-mode~            | View keymap & mode help                             |
+
+* Running Tests
+
+Run the full ERT test suite using Emacs batch mode:
+
+#+BEGIN_SRC bash
+/Applications/Emacs.app/Contents/MacOS/bin/emacs --batch -Q -L . -l test-jj-diff.el -f ert-run-tests-batch-and-exit
+#+END_SRC
