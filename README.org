@@ -58,20 +58,20 @@ With ~use-package~ with ~straight.el~:
 
 * Keybindings Reference
 
-| Key       | Command                  | Description                                         |
-|-----------+--------------------------+-----------------------------------------------------|
-| ~m~ / ~s~     | ~jj-diff-mark~             | Toggle marked state for line, region, hunk, or file |
-| ~u~         | ~jj-diff-unmark~           | Unmark line, region, hunk, or file                  |
-| ~M~ / ~S~     | ~jj-diff-mark-all~         | Mark all changes                                    |
-| ~U~         | ~jj-diff-unmark-all~       | Unmark all changes                                  |
-| ~TAB~ / ~RET~ | ~jj-diff-toggle-fold~      | Collapse / expand current hunk or file              |
-| ~S-TAB~     | ~jj-diff-toggle-all-folds~ | Collapse / expand all hunks in buffer (like Magit)  |
-| ~n~ / ~p~     | ~jj-diff-next-hunk~        | Move to next / previous hunk                        |
-| ~N~ / ~P~     | ~jj-diff-next-file~        | Move to next / previous file                        |
-| ~c~         | ~jj-diff-commit~           | Open commit description buffer                      |
-| ~g~         | ~jj-diff-refresh~          | Refresh working copy diff                           |
-| ~q~         | ~quit-window~              | Close diff buffer                                   |
-| ~?~         | ~describe-mode~            | View keymap & mode help                             |
+| Key       | Command                  | Description                                                  |
+|-----------+--------------------------+--------------------------------------------------------------|
+| ~m~ / ~s~     | ~jj-diff-mark~             | Toggle marked state for line, region, hunk, or file          |
+| ~u~         | ~jj-diff-unmark~           | Unmark line, region, hunk, or file                           |
+| ~M~ / ~S~     | ~jj-diff-mark-all~         | Mark all changes                                             |
+| ~U~         | ~jj-diff-unmark-all~       | Unmark all changes                                           |
+| ~TAB~ / ~RET~ | ~jj-diff-toggle-fold~      | Cycle section at point: Files (1) ↔ Hunks (2) ↔ All code (3) |
+| ~S-TAB~     | ~jj-diff-toggle-all-folds~ | Cycle global visibility: Files ↔ Hunks ↔ All code (Magit)    |
+| ~n~ / ~p~     | ~jj-diff-next-hunk~        | Move to next / previous hunk                                 |
+| ~N~ / ~P~     | ~jj-diff-next-file~        | Move to next / previous file                                 |
+| ~c~         | ~jj-diff-commit~           | Open commit description buffer                               |
+| ~g~         | ~jj-diff-refresh~          | Refresh working copy diff                                    |
+| ~q~         | ~quit-window~              | Close diff buffer                                            |
+| ~?~         | ~describe-mode~            | View keymap & mode help                                      |
 
 * Running Tests
 

@@ -136,6 +136,10 @@
   hunks
   beg-pos
   end-pos
+  body-beg-pos
+  body-end-pos
+  fold-overlay
+  fold-direction
   header-overlay)
 
 (cl-defstruct (jj-diff-hunk (:constructor jj-diff-hunk-create))
@@ -322,6 +326,9 @@ or queries `jj root` from DIR."
             (overlay-put ov 'jj-diff-file file)
             (setf (jj-diff-file-header-overlay file) ov)))
 
+        ;; Start of file body
+        (setf (jj-diff-file-body-beg-pos file) (point))
+
         ;; Hunks
         (dolist (hunk (jj-diff-file-hunks file))
           (setf (jj-diff-hunk-beg-pos hunk) (point))
@@ -363,9 +370,17 @@ or queries `jj root` from DIR."
                 (push line all-lines))))
           (setf (jj-diff-hunk-body-end-pos hunk) (point))
           (setf (jj-diff-hunk-end-pos hunk) (point))
+          (let ((ov (make-overlay (jj-diff-hunk-body-beg-pos hunk) (jj-diff-hunk-body-end-pos hunk))))
+            (overlay-put ov 'isearch-open-invisible #'ignore)
+            (setf (jj-diff-hunk-fold-overlay hunk) ov))
           (jj-diff--update-hunk-header-overlay hunk))
+        (setf (jj-diff-file-body-end-pos file) (point))
         (insert "\n")
         (setf (jj-diff-file-end-pos file) (point))
+        (let ((ov (make-overlay (jj-diff-file-body-beg-pos file) (jj-diff-file-end-pos file))))
+          (overlay-put ov 'isearch-open-invisible #'ignore)
+          (setf (jj-diff-file-fold-overlay file) ov))
+        (setf (jj-diff-file-fold-direction file) 'expand)
         (jj-diff--update-file-header-overlay file)))
 
     (setq jj-diff--all-lines (nreverse all-lines))
@@ -613,59 +628,135 @@ With prefix ARG, unmark instead."
 
 (defalias 'jj-diff-count-staged-lines #'jj-diff-count-marked-lines)
 
-(defun jj-diff--toggle-hunk-fold (hunk &optional force-state)
-  "Toggle fold visibility for HUNK.
-If FORCE-STATE is non-nil, set invisible to FORCE-STATE (t to hide, nil to show)."
-  (let ((ov (jj-diff-hunk-fold-overlay hunk))
-        (beg (jj-diff-hunk-body-beg-pos hunk))
-        (end (jj-diff-hunk-body-end-pos hunk)))
-    (when (and beg end (> end beg))
-      (unless (and ov (overlayp ov))
-        (setq ov (make-overlay beg end))
-        (overlay-put ov 'isearch-open-invisible #'ignore)
-        (setf (jj-diff-hunk-fold-overlay hunk) ov))
-      (let* ((cur-inv (overlay-get ov 'invisible))
-             (new-inv (if (null force-state)
-                          (not cur-inv)
-                        (eq force-state t))))
-        (overlay-put ov 'invisible new-inv)))))
+(defvar-local jj-diff--global-fold-direction 'expand
+  "Direction of global folding cycle: 'expand or 'narrow.")
+
+(defun jj-diff--set-file-level (file level)
+  "Set visibility LEVEL of FILE.
+LEVEL 1: File only (hide all hunk headers and code).
+LEVEL 2: Hunk headers visible, code collapsed.
+LEVEL 3: All code expanded."
+  (let ((file-ov (jj-diff-file-fold-overlay file)))
+    (cl-case level
+      (1
+       (when (and file-ov (overlayp file-ov))
+         (overlay-put file-ov 'invisible t))
+       (dolist (h (jj-diff-file-hunks file))
+         (when-let* ((hov (jj-diff-hunk-fold-overlay h)))
+           (overlay-put hov 'invisible t))))
+      (2
+       (when (and file-ov (overlayp file-ov))
+         (overlay-put file-ov 'invisible nil))
+       (dolist (h (jj-diff-file-hunks file))
+         (when-let* ((hov (jj-diff-hunk-fold-overlay h)))
+           (overlay-put hov 'invisible t))))
+      (3
+       (when (and file-ov (overlayp file-ov))
+         (overlay-put file-ov 'invisible nil))
+       (dolist (h (jj-diff-file-hunks file))
+         (when-let* ((hov (jj-diff-hunk-fold-overlay h)))
+           (overlay-put hov 'invisible nil)))))))
+
+(defun jj-diff--get-file-level (file)
+  "Get the current visibility level of FILE (1, 2, or 3)."
+  (let ((file-ov (jj-diff-file-fold-overlay file)))
+    (if (and file-ov (overlay-get file-ov 'invisible))
+        1
+      (let* ((hunks (jj-diff-file-hunks file))
+             (all-hunks-open (and hunks
+                                  (cl-every (lambda (h)
+                                              (let ((hov (jj-diff-hunk-fold-overlay h)))
+                                                (not (and hov (overlay-get hov 'invisible)))))
+                                            hunks))))
+        (if all-hunks-open 3 2)))))
+
+(defun jj-diff--cycle-file-fold (file)
+  "Cycle visibility level of FILE: 1 (File) -> 2 (Hunks) -> 3 (All code) -> 2 -> 1."
+  (let ((cur-level (jj-diff--get-file-level file))
+        (direction (or (jj-diff-file-fold-direction file) 'expand)))
+    (cond
+     ((= cur-level 1)
+      (jj-diff--set-file-level file 2)
+      (setf (jj-diff-file-fold-direction file) 'expand)
+      (message "Showing hunks for %s." (jj-diff-file-new-path file)))
+
+     ((= cur-level 3)
+      (jj-diff--set-file-level file 2)
+      (setf (jj-diff-file-fold-direction file) 'narrow)
+      (message "Collapsed code for %s." (jj-diff-file-new-path file)))
+
+     ((= cur-level 2)
+      (if (eq direction 'expand)
+          (progn
+            (jj-diff--set-file-level file 3)
+            (setf (jj-diff-file-fold-direction file) 'narrow)
+            (message "Expanded all code for %s." (jj-diff-file-new-path file)))
+        (jj-diff--set-file-level file 1)
+        (setf (jj-diff-file-fold-direction file) 'expand)
+        (message "Collapsed %s to file header only." (jj-diff-file-new-path file)))))))
+
+(defun jj-diff--get-global-level ()
+  "Get the overall visibility level across all files: 1, 2, or 3."
+  (let ((levels (mapcar #'jj-diff--get-file-level jj-diff--files)))
+    (cond
+     ((null levels) 3)
+     ((cl-every (lambda (l) (= l 1)) levels) 1)
+     ((cl-every (lambda (l) (= l 3)) levels) 3)
+     (t 2))))
 
 (defun jj-diff-toggle-fold ()
-  "Toggle visibility of current hunk or file at point."
+  "Toggle or cycle visibility of section at point.
+On a hunk header or inside a hunk: toggles code lines in that hunk.
+On a file header: cycles File (1) -> Hunks (2) -> All code (3) -> Hunks (2) -> File (1)."
   (interactive)
   (cond
-   ;; File header
-   ((jj-diff--file-at-point)
-    (let* ((file (jj-diff--file-at-point))
-           (hunks (jj-diff-file-hunks file)))
-      (when hunks
-        ;; If any hunk is visible, hide all; otherwise show all
-        (let* ((any-visible (cl-some (lambda (h)
-                                       (let ((ov (jj-diff-hunk-fold-overlay h)))
-                                         (not (and ov (overlay-get ov 'invisible)))))
-                                     hunks))
-               (target-hide any-visible))
-          (dolist (h hunks)
-            (jj-diff--toggle-hunk-fold h target-hide))))))
-
    ;; Hunk header or inside hunk
    ((jj-diff--hunk-at-point)
-    (jj-diff--toggle-hunk-fold (jj-diff--hunk-at-point)))))
+    (let* ((hunk (jj-diff--hunk-at-point))
+           (ov (jj-diff-hunk-fold-overlay hunk)))
+      (if (and ov (overlay-get ov 'invisible))
+          (overlay-put ov 'invisible nil)
+        (overlay-put ov 'invisible t))))
+
+   ;; File header
+   ((jj-diff--file-at-point)
+    (jj-diff--cycle-file-fold (jj-diff--file-at-point)))))
 
 (defun jj-diff-toggle-all-folds ()
-  "Toggle visibility of all hunks in the buffer.
-If any hunk is visible, collapse all hunks; otherwise expand all hunks."
+  "Cycle global visibility level: File (1) -> Hunks (2) -> All code (3) -> Hunks (2) -> File (1)."
   (interactive)
-  (let* ((all-hunks (cl-loop for f in jj-diff--files
-                             append (copy-sequence (jj-diff-file-hunks f))))
-         (any-visible (cl-some (lambda (h)
-                                 (let ((ov (jj-diff-hunk-fold-overlay h)))
-                                   (not (and ov (overlay-get ov 'invisible)))))
-                               all-hunks))
-         (target-hide any-visible))
-    (dolist (h all-hunks)
-      (jj-diff--toggle-hunk-fold h target-hide))
-    (message (if target-hide "Collapsed all hunks." "Expanded all hunks."))))
+  (unless jj-diff--files
+    (user-error "No files in diff"))
+  (let ((cur-level (jj-diff--get-global-level))
+        (direction jj-diff--global-fold-direction))
+    (cond
+     ((= cur-level 1)
+      (dolist (f jj-diff--files)
+        (jj-diff--set-file-level f 2)
+        (setf (jj-diff-file-fold-direction f) 'expand))
+      (setq jj-diff--global-fold-direction 'expand)
+      (message "Showing hunks (code collapsed)."))
+
+     ((= cur-level 3)
+      (dolist (f jj-diff--files)
+        (jj-diff--set-file-level f 2)
+        (setf (jj-diff-file-fold-direction f) 'narrow))
+      (setq jj-diff--global-fold-direction 'narrow)
+      (message "Showing hunks (code collapsed)."))
+
+     ((= cur-level 2)
+      (if (eq direction 'expand)
+          (progn
+            (dolist (f jj-diff--files)
+              (jj-diff--set-file-level f 3)
+              (setf (jj-diff-file-fold-direction f) 'narrow))
+            (setq jj-diff--global-fold-direction 'narrow)
+            (message "Expanded all code."))
+        (dolist (f jj-diff--files)
+          (jj-diff--set-file-level f 1)
+          (setf (jj-diff-file-fold-direction f) 'expand))
+        (setq jj-diff--global-fold-direction 'expand)
+        (message "Collapsed to files only."))))))
 
 ;;; Selected Patch Generator
 

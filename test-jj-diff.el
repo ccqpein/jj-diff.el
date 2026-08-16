@@ -485,7 +485,7 @@
         (should (eq (overlay-get (jj-diff-hunk-fold-overlay hunk) 'invisible) nil))))))
 
 (ert-deftest jj-diff-test-file-folding ()
-  "Test folding an entire file with multiple hunks."
+  "Test cycling a file header through File (1) -> Hunks (2) -> Code (3) -> Hunks (2) -> File (1)."
   (let ((diff-str (concat "diff --git a/fold_file.txt b/fold_file.txt\n"
                           "--- a/fold_file.txt\n"
                           "+++ b/fold_file.txt\n"
@@ -501,19 +501,36 @@
       (jj-diff--render-buffer)
       (let* ((file (car jj-diff--files))
              (hunks (jj-diff-file-hunks file)))
-        ;; Move to file header and fold
+        ;; Initially level 3 (all code visible)
+        (should (= (jj-diff--get-file-level file) 3))
+
+        ;; Move to file header and press TAB -> narrows to Level 2 (hunks only)
         (goto-char (jj-diff-file-beg-pos file))
         (jj-diff-toggle-fold)
+        (should (= (jj-diff--get-file-level file) 2))
+        (should-not (overlay-get (jj-diff-file-fold-overlay file) 'invisible))
         (should (eq (overlay-get (jj-diff-hunk-fold-overlay (nth 0 hunks)) 'invisible) t))
         (should (eq (overlay-get (jj-diff-hunk-fold-overlay (nth 1 hunks)) 'invisible) t))
 
-        ;; Unfold
+        ;; Press TAB again -> narrows to Level 1 (file header only)
         (jj-diff-toggle-fold)
-        (should (eq (overlay-get (jj-diff-hunk-fold-overlay (nth 0 hunks)) 'invisible) nil))
-        (should (eq (overlay-get (jj-diff-hunk-fold-overlay (nth 1 hunks)) 'invisible) nil))))))
+        (should (= (jj-diff--get-file-level file) 1))
+        (should (eq (overlay-get (jj-diff-file-fold-overlay file) 'invisible) t))
+
+        ;; Press TAB again -> expands to Level 2 (hunks only)
+        (jj-diff-toggle-fold)
+        (should (= (jj-diff--get-file-level file) 2))
+        (should-not (overlay-get (jj-diff-file-fold-overlay file) 'invisible))
+        (should (eq (overlay-get (jj-diff-hunk-fold-overlay (nth 0 hunks)) 'invisible) t))
+
+        ;; Press TAB again -> expands to Level 3 (all code)
+        (jj-diff-toggle-fold)
+        (should (= (jj-diff--get-file-level file) 3))
+        (should-not (overlay-get (jj-diff-file-fold-overlay file) 'invisible))
+        (should-not (overlay-get (jj-diff-hunk-fold-overlay (nth 0 hunks)) 'invisible))))))
 
 (ert-deftest jj-diff-test-toggle-all-folds ()
-  "Test toggling all folds across multiple files and hunks (Shift-TAB)."
+  "Test global 3-level cycling: File (1) -> Hunks (2) -> Code (3) -> Hunks (2) -> File (1)."
   (let ((diff-str (concat "diff --git a/a.txt b/a.txt\n"
                           "--- a/a.txt\n"
                           "+++ b/a.txt\n"
@@ -530,17 +547,24 @@
       (jj-diff-mode)
       (setq jj-diff--files (jj-diff--parse-unified-diff diff-str))
       (jj-diff--render-buffer)
-      (let* ((hunk-a (car (jj-diff-file-hunks (nth 0 jj-diff--files))))
-             (hunk-b (car (jj-diff-file-hunks (nth 1 jj-diff--files)))))
-        ;; Toggle all folds -> should collapse both hunks
-        (jj-diff-toggle-all-folds)
-        (should (eq (overlay-get (jj-diff-hunk-fold-overlay hunk-a) 'invisible) t))
-        (should (eq (overlay-get (jj-diff-hunk-fold-overlay hunk-b) 'invisible) t))
+      ;; Initially Level 3 (all code visible)
+      (should (= (jj-diff--get-global-level) 3))
 
-        ;; Toggle all folds again -> should expand both hunks
-        (jj-diff-toggle-all-folds)
-        (should (eq (overlay-get (jj-diff-hunk-fold-overlay hunk-a) 'invisible) nil))
-        (should (eq (overlay-get (jj-diff-hunk-fold-overlay hunk-b) 'invisible) nil))))))
+      ;; 1. Press S-TAB -> narrows to Level 2 (hunk headers visible, code collapsed)
+      (jj-diff-toggle-all-folds)
+      (should (= (jj-diff--get-global-level) 2))
+
+      ;; 2. Press S-TAB -> narrows to Level 1 (file headers only)
+      (jj-diff-toggle-all-folds)
+      (should (= (jj-diff--get-global-level) 1))
+
+      ;; 3. Press S-TAB -> expands to Level 2 (hunk headers visible)
+      (jj-diff-toggle-all-folds)
+      (should (= (jj-diff--get-global-level) 2))
+
+      ;; 4. Press S-TAB -> expands to Level 3 (all code visible)
+      (jj-diff-toggle-all-folds)
+      (should (= (jj-diff--get-global-level) 3)))))
 
 ;;; 5. Commit Description Buffer Validation Tests
 
