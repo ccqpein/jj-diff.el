@@ -344,6 +344,51 @@
         (jj-diff-mark)
         (should (= (jj-diff-count-marked-lines) 0))))))
 
+(ert-deftest jj-diff-test-header-overlays-marked-and-partial ()
+  "Test file and hunk header overlays when fully marked vs partially marked."
+  (let ((diff-str (concat "diff --git a/test.txt b/test.txt\n"
+                          "--- a/test.txt\n"
+                          "+++ b/test.txt\n"
+                          "@@ -1,3 +1,3 @@\n"
+                          "-line 1\n"
+                          "+line 1 new\n"
+                          "-line 2\n"
+                          "+line 2 new\n")))
+    (with-temp-buffer
+      (jj-diff-mode)
+      (setq jj-diff--files (jj-diff--parse-unified-diff diff-str))
+      (jj-diff--render-buffer)
+      (let* ((file (car jj-diff--files))
+             (hunk (car (jj-diff-file-hunks file)))
+             (file-ov (jj-diff-file-header-overlay file))
+             (hunk-ov (jj-diff-hunk-header-overlay hunk)))
+        ;; Initially none marked
+        (should (overlayp file-ov))
+        (should (overlayp hunk-ov))
+        (should-not (overlay-get file-ov 'face))
+        (should-not (overlay-get file-ov 'after-string))
+
+        ;; Partially mark (1 out of 4 lines)
+        (goto-char (point-min))
+        (search-forward "+line 1 new")
+        (jj-diff-mark)
+        (should (= (jj-diff-count-marked-lines) 1))
+        (should-not (overlay-get file-ov 'face))
+        (should (string-match-p "1/4" (overlay-get file-ov 'after-string)))
+        (should (string-match-p "1/4" (overlay-get hunk-ov 'after-string)))
+
+        ;; Fully mark (all 4 lines in file)
+        (jj-diff-mark-all)
+        (should (eq (overlay-get file-ov 'face) 'jj-diff-marked))
+        (should (string-match-p "✓ 4/4" (overlay-get file-ov 'after-string)))
+        (should (eq (overlay-get hunk-ov 'face) 'jj-diff-marked))
+        (should (string-match-p "✓ 4/4" (overlay-get hunk-ov 'after-string)))
+
+        ;; Unmark all
+        (jj-diff-unmark-all)
+        (should-not (overlay-get file-ov 'face))
+        (should-not (overlay-get file-ov 'after-string))))))
+
 (ert-deftest jj-diff-test-region-marking ()
   "Test marking active region of lines."
   (let ((diff-str (concat "diff --git a/reg.txt b/reg.txt\n"

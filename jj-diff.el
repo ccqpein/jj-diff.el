@@ -98,6 +98,15 @@
 
 (put 'jj-diff-staged-fringe 'face-alias 'jj-diff-marked-fringe)
 
+(defface jj-diff-partial
+  '((((class color) (background dark))
+     :foreground "#e0af68" :weight bold)
+    (((class color) (background light))
+     :foreground "#b07d12" :weight bold)
+    (t :weight bold))
+  "Face used for partially marked indicators on headers in `jj-diff-mode`."
+  :group 'jj-diff)
+
 (defface jj-diff-meta-header
   '((((class color) (background dark))
      :foreground "#565f89" :slant italic)
@@ -126,7 +135,8 @@
   meta-lines
   hunks
   beg-pos
-  end-pos)
+  end-pos
+  header-overlay)
 
 (cl-defstruct (jj-diff-hunk (:constructor jj-diff-hunk-create))
   file
@@ -140,7 +150,8 @@
   end-pos
   body-beg-pos
   body-end-pos
-  fold-overlay)
+  fold-overlay
+  header-overlay)
 
 (cl-defstruct (jj-diff-line (:constructor jj-diff-line-create))
   hunk
@@ -306,7 +317,10 @@ or queries `jj root` from DIR."
         (let ((file-header-start (point)))
           (insert (format "modified %s\n" (jj-diff-file-new-path file)))
           (put-text-property file-header-start (point) 'face 'jj-diff-file-header)
-          (put-text-property file-header-start (point) 'jj-diff-file file))
+          (put-text-property file-header-start (point) 'jj-diff-file file)
+          (let ((ov (make-overlay file-header-start (1- (point)))))
+            (overlay-put ov 'jj-diff-file file)
+            (setf (jj-diff-file-header-overlay file) ov)))
 
         ;; Hunks
         (dolist (hunk (jj-diff-file-hunks file))
@@ -316,7 +330,10 @@ or queries `jj root` from DIR."
             (insert (format "%s\n" (jj-diff-hunk-header hunk)))
             (put-text-property hunk-header-start (point) 'face 'jj-diff-hunk-header)
             (put-text-property hunk-header-start (point) 'jj-diff-hunk hunk)
-            (put-text-property hunk-header-start (point) 'jj-diff-file file))
+            (put-text-property hunk-header-start (point) 'jj-diff-file file)
+            (let ((ov (make-overlay hunk-header-start (1- (point)))))
+              (overlay-put ov 'jj-diff-hunk hunk)
+              (setf (jj-diff-hunk-header-overlay hunk) ov)))
 
           ;; Lines
           (setf (jj-diff-hunk-body-beg-pos hunk) (point))
@@ -345,9 +362,11 @@ or queries `jj root` from DIR."
 
                 (push line all-lines))))
           (setf (jj-diff-hunk-body-end-pos hunk) (point))
-          (setf (jj-diff-hunk-end-pos hunk) (point)))
+          (setf (jj-diff-hunk-end-pos hunk) (point))
+          (jj-diff--update-hunk-header-overlay hunk))
         (insert "\n")
-        (setf (jj-diff-file-end-pos file) (point))))
+        (setf (jj-diff-file-end-pos file) (point))
+        (jj-diff--update-file-header-overlay file)))
 
     (setq jj-diff--all-lines (nreverse all-lines))
     (goto-char (min orig-point (point-max)))))
@@ -368,6 +387,53 @@ or queries `jj root` from DIR."
         (overlay-put ov 'face nil)
         (overlay-put ov 'before-string nil)))))
 
+(defun jj-diff--update-hunk-header-overlay (hunk)
+  "Update the header overlay of HUNK to reflect its marked status."
+  (let ((ov (jj-diff-hunk-header-overlay hunk)))
+    (when (and ov (overlayp ov))
+      (let* ((lines (cl-remove-if-not (lambda (l) (memq (jj-diff-line-type l) '(:add :del)))
+                                      (jj-diff-hunk-lines hunk)))
+             (total (length lines))
+             (marked (cl-count-if #'jj-diff-line-marked lines)))
+        (cond
+         ((and (> total 0) (= marked total))
+          (overlay-put ov 'face 'jj-diff-marked)
+          (overlay-put ov 'after-string
+                       (propertize (format " [✓ %d/%d]" marked total)
+                                   'face 'jj-diff-marked-fringe)))
+         ((> marked 0)
+          (overlay-put ov 'face nil)
+          (overlay-put ov 'after-string
+                       (propertize (format " [● %d/%d]" marked total)
+                                   'face 'jj-diff-partial)))
+         (t
+          (overlay-put ov 'face nil)
+          (overlay-put ov 'after-string nil)))))))
+
+(defun jj-diff--update-file-header-overlay (file)
+  "Update the header overlay of FILE to reflect its marked status."
+  (let ((ov (jj-diff-file-header-overlay file)))
+    (when (and ov (overlayp ov))
+      (let* ((lines (cl-loop for h in (jj-diff-file-hunks file)
+                             append (cl-remove-if-not (lambda (l) (memq (jj-diff-line-type l) '(:add :del)))
+                                                      (jj-diff-hunk-lines h))))
+             (total (length lines))
+             (marked (cl-count-if #'jj-diff-line-marked lines)))
+        (cond
+         ((and (> total 0) (= marked total))
+          (overlay-put ov 'face 'jj-diff-marked)
+          (overlay-put ov 'after-string
+                       (propertize (format " [✓ %d/%d]" marked total)
+                                   'face 'jj-diff-marked-fringe)))
+         ((> marked 0)
+          (overlay-put ov 'face nil)
+          (overlay-put ov 'after-string
+                       (propertize (format " [● %d/%d]" marked total)
+                                   'face 'jj-diff-partial)))
+         (t
+          (overlay-put ov 'face nil)
+          (overlay-put ov 'after-string nil)))))))
+
 ;;; Marking Mechanics
 
 (defun jj-diff--line-at-point ()
@@ -386,7 +452,13 @@ or queries `jj root` from DIR."
   "Set MARKED status for LINE and update its visual overlay."
   (when (memq (jj-diff-line-type line) '(:add :del))
     (setf (jj-diff-line-marked line) marked)
-    (jj-diff--update-line-overlay line)))
+    (jj-diff--update-line-overlay line)
+    (let ((hunk (jj-diff-line-hunk line)))
+      (when hunk
+        (jj-diff--update-hunk-header-overlay hunk)
+        (let ((file (jj-diff-hunk-file hunk)))
+          (when file
+            (jj-diff--update-file-header-overlay file)))))))
 
 (defun jj-diff-mark (&optional arg)
   "Mark current line, active region, hunk, or file.
@@ -452,7 +524,13 @@ With prefix ARG, unmark instead."
   "Mark all change lines in the buffer."
   (interactive)
   (dolist (line jj-diff--all-lines)
-    (jj-diff--set-line-marked line t))
+    (when (memq (jj-diff-line-type line) '(:add :del))
+      (setf (jj-diff-line-marked line) t)
+      (jj-diff--update-line-overlay line)))
+  (dolist (file jj-diff--files)
+    (dolist (hunk (jj-diff-file-hunks file))
+      (jj-diff--update-hunk-header-overlay hunk))
+    (jj-diff--update-file-header-overlay file))
   (message "Marked all changes."))
 
 (defalias 'jj-diff-stage-all #'jj-diff-mark-all)
@@ -461,7 +539,13 @@ With prefix ARG, unmark instead."
   "Unmark all change lines in the buffer."
   (interactive)
   (dolist (line jj-diff--all-lines)
-    (jj-diff--set-line-marked line nil))
+    (when (memq (jj-diff-line-type line) '(:add :del))
+      (setf (jj-diff-line-marked line) nil)
+      (jj-diff--update-line-overlay line)))
+  (dolist (file jj-diff--files)
+    (dolist (hunk (jj-diff-file-hunks file))
+      (jj-diff--update-hunk-header-overlay hunk))
+    (jj-diff--update-file-header-overlay file))
   (message "Unmarked all changes."))
 
 (defalias 'jj-diff-unstage-all #'jj-diff-unmark-all)
