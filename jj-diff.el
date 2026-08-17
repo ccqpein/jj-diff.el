@@ -888,6 +888,7 @@ PATCH-FILE is the path to the selected unified diff patch."
     map)
   "Keymap for `jj-describe-mode`.")
 
+;;;###autoload
 (define-derived-mode jj-describe-mode text-mode "JJ-Describe"
   "Major mode for editing Jujutsu commit descriptions."
   (setq-local header-line-format
@@ -1008,6 +1009,7 @@ PATCH-FILE is the path to the selected unified diff patch."
     map)
   "Keymap for `jj-diff-mode`.")
 
+;;;###autoload
 (define-derived-mode jj-diff-mode special-mode "JJ-Diff"
   "Major mode for viewing Jujutsu diffs and marking changes for split commits.
 
@@ -1017,6 +1019,7 @@ PATCH-FILE is the path to the selected unified diff patch."
 
 ;;; User-Facing Entry Points
 
+;;;###autoload
 (defun jj-diff-refresh ()
   "Refresh the current `jj-diff` buffer."
   (interactive)
