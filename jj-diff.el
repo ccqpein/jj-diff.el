@@ -186,19 +186,14 @@
 ;;; Jujutsu Command Helpers
 
 (defun jj-diff--find-repo-root (&optional dir)
-  "Find the Jujutsu repository root for DIR (or `default-directory`).
-Traverses parent directories to locate the closest `.jj` directory,
-or queries `jj root` from DIR."
-  (let* ((search-dir (file-name-as-directory
-                      (expand-file-name (or dir default-directory))))
-         (dom-dir (locate-dominating-file search-dir ".jj")))
-    (if dom-dir
-        (directory-file-name (expand-file-name dom-dir))
-      ;; Fallback to running jj root with default-directory set to search-dir
-      (let ((default-directory search-dir))
-        (with-temp-buffer
-          (when (zerop (call-process jj-diff-executable nil t nil "root"))
-            (string-trim (buffer-string))))))))
+  "Find the Jujutsu repository root for DIR (or `default-directory`) directly using `jj root`."
+  (let ((default-directory (file-name-as-directory
+                            (expand-file-name (or dir default-directory)))))
+    (with-temp-buffer
+      (when (zerop (call-process jj-diff-executable nil t nil "--color=never" "--no-pager" "root"))
+        (let ((root-str (string-trim (buffer-string))))
+          (unless (string-empty-p root-str)
+            (directory-file-name root-str)))))))
 
 (defun jj-diff--run-command (args &optional dir)
   "Run `jj` with ARGS synchronously in DIR. Return stdout as a string or error."
