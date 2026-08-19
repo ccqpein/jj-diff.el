@@ -159,9 +159,11 @@
 
 (cl-defstruct (jj-diff-line (:constructor jj-diff-line-create))
   hunk
-  type      ; :context, :add, :del
-  text      ; original text without newline
-  marked    ; t or nil
+  type          ; :context, :add, :del
+  text          ; original text without newline
+  marked        ; t or nil
+  old-line-num
+  new-line-num
   beg-pos
   end-pos
   overlay)
@@ -214,7 +216,9 @@
   (let ((lines (split-string diff-text "\n" nil))
         (files nil)
         (current-file nil)
-        (current-hunk nil))
+        (current-hunk nil)
+        (cur-old-line 1)
+        (cur-new-line 1))
     (dolist (line lines)
       (cond
        ;; Start of a file diff: "diff --git a/... b/..."
@@ -265,6 +269,8 @@
                       :new-count new-count
                       :lines nil)))
           (setq current-hunk hunk)
+          (setq cur-old-line old-start)
+          (setq cur-new-line new-start)
           (when current-file
             (setf (jj-diff-file-hunks current-file)
                   (append (jj-diff-file-hunks current-file) (list hunk))))))
@@ -279,11 +285,28 @@
                (type (cond
                       ((string= prefix "+") :add)
                       ((string= prefix "-") :del)
-                      (t :context))))
+                      (t :context)))
+               (old-num nil)
+               (new-num nil))
+          (cl-case type
+            (:add
+             (setq new-num cur-new-line)
+             (cl-incf cur-new-line))
+            (:del
+             (setq old-num cur-old-line)
+             (setq new-num (max 1 cur-new-line))
+             (cl-incf cur-old-line))
+            (:context
+             (setq old-num cur-old-line)
+             (setq new-num cur-new-line)
+             (cl-incf cur-old-line)
+             (cl-incf cur-new-line)))
           (let ((diff-line (jj-diff-line-create
                             :hunk current-hunk
                             :type type
                             :text line
+                            :old-line-num old-num
+                            :new-line-num new-num
                             :marked nil)))
             (setf (jj-diff-hunk-lines current-hunk)
                   (append (jj-diff-hunk-lines current-hunk) (list diff-line))))))))
@@ -305,7 +328,7 @@
                         'face 'jj-diff-status-bar))
     (insert (propertize (format " Repository: %s\n" jj-diff--repo-root)
                         'face 'jj-diff-meta-header))
-    (insert (propertize " [m/s] Mark  [u] Unmark  [M/S] Mark All  [U] Unmark All  [TAB] Fold  [S-TAB] Fold All  [c] Commit  [g] Refresh  [q] Quit\n\n"
+    (insert (propertize " [m/s] Mark  [u] Unmark  [M/S] Mark All  [U] Unmark All  [TAB] Fold  [S-TAB] Fold All  [RET] Visit  [c] Commit  [g] Refresh  [q] Quit\n\n"
                         'face 'jj-diff-meta-header))
 
     (if (null jj-diff--files)
@@ -977,11 +1000,60 @@ PATCH-FILE is the path to the selected unified diff patch."
 
 ;;; Keymap & Major Mode
 
+;;;###autoload
+(defun jj-diff-visit-file (&optional other-window)
+  "Jump to the file and line at point in the working tree.
+Cannot jump from deleted (-) lines as they no longer exist in the working file.
+With optional prefix ARG (OTHER-WINDOW), open in another window."
+  (interactive "P")
+  (let* ((line (jj-diff--line-at-point))
+         (hunk (or (and line (jj-diff-line-hunk line))
+                   (jj-diff--hunk-at-point)))
+         (file (or (and hunk (jj-diff-hunk-file hunk))
+                   (jj-diff--file-at-point)))
+         (repo-root (or jj-diff--repo-root (jj-diff--find-repo-root))))
+    (when (and line (eq (jj-diff-line-type line) :del))
+      (user-error "Cannot jump: deleted line no longer exists in working copy"))
+    (unless file
+      (user-error "No file at point"))
+    (unless repo-root
+      (user-error "Cannot determine repository root"))
+    (let* ((rel-path (or (jj-diff-file-new-path file)
+                         (jj-diff-file-old-path file)))
+           (target-file (expand-file-name rel-path repo-root)))
+      (unless (file-exists-p target-file)
+        (user-error "File %s does not exist on disk" target-file))
+      (let* ((target-line (cond
+                           (line (or (jj-diff-line-new-line-num line) 1))
+                           (hunk (or (jj-diff-hunk-new-start hunk) 1))
+                           (t 1)))
+             (col (max 0 (1- (current-column))))
+             (target-buf (find-file-noselect target-file)))
+        (if other-window
+            (pop-to-buffer target-buf '((display-buffer-pop-up-window
+                                         display-buffer-use-some-window)
+                                        (inhibit-same-window . t)))
+          (pop-to-buffer-same-window target-buf))
+        (goto-char (point-min))
+        (forward-line (1- (max 1 target-line)))
+        (move-to-column col)
+        (message "Jumped to %s:%d" (file-name-nondirectory target-file) target-line)))))
+
+;;;###autoload
+(defun jj-diff-visit-file-other-window ()
+  "Jump to the file and line at point in another window."
+  (interactive)
+  (jj-diff-visit-file t))
+
+(defalias 'jj-diff-jump #'jj-diff-visit-file)
+
 (defvar jj-diff-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "TAB") #'jj-diff-toggle-fold)
     (define-key map (kbd "<tab>") #'jj-diff-toggle-fold)
-    (define-key map (kbd "RET") #'jj-diff-toggle-fold)
+    (define-key map (kbd "RET") #'jj-diff-visit-file)
+    (define-key map (kbd "<return>") #'jj-diff-visit-file)
+    (define-key map (kbd "o") #'jj-diff-visit-file-other-window)
     (define-key map (kbd "<backtab>") #'jj-diff-toggle-all-folds)
     (define-key map (kbd "S-TAB") #'jj-diff-toggle-all-folds)
     (define-key map (kbd "<S-tab>") #'jj-diff-toggle-all-folds)

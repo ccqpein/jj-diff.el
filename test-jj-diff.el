@@ -125,6 +125,35 @@
   (let ((files (jj-diff--parse-unified-diff "")))
     (should (null files))))
 
+(ert-deftest jj-diff-test-line-numbers-calculation ()
+  "Test that line numbers in new and old files are correctly calculated on diff lines."
+  (let ((diff-str (concat "diff --git a/test.txt b/test.txt\n"
+                          "--- a/test.txt\n"
+                          "+++ b/test.txt\n"
+                          "@@ -10,3 +10,4 @@\n"
+                          " line 10\n"
+                          "-line 11\n"
+                          "+line 11 new\n"
+                          "+line 12 new\n"
+                          " line 13\n")))
+    (let* ((files (jj-diff--parse-unified-diff diff-str))
+           (lines (jj-diff-hunk-lines (car (jj-diff-file-hunks (car files))))))
+      ;; line 10 (context): old 10, new 10
+      (should (= (jj-diff-line-old-line-num (nth 0 lines)) 10))
+      (should (= (jj-diff-line-new-line-num (nth 0 lines)) 10))
+      ;; -line 11 (del): old 11, new 11
+      (should (= (jj-diff-line-old-line-num (nth 1 lines)) 11))
+      (should (= (jj-diff-line-new-line-num (nth 1 lines)) 11))
+      ;; +line 11 new (add): old nil, new 11
+      (should-not (jj-diff-line-old-line-num (nth 2 lines)))
+      (should (= (jj-diff-line-new-line-num (nth 2 lines)) 11))
+      ;; +line 12 new (add): old nil, new 12
+      (should-not (jj-diff-line-old-line-num (nth 3 lines)))
+      (should (= (jj-diff-line-new-line-num (nth 3 lines)) 12))
+      ;; line 13 (context): old 12, new 13
+      (should (= (jj-diff-line-old-line-num (nth 4 lines)) 12))
+      (should (= (jj-diff-line-new-line-num (nth 4 lines)) 13)))))
+
 ;;; 2. Patch Generator Tests
 
 (ert-deftest jj-diff-test-generate-selected-patch ()
@@ -457,6 +486,47 @@
         ;; Prev file
         (jj-diff-prev-file)
         (should (string= (jj-diff-file-new-path (jj-diff--file-at-point)) "f1.txt"))))))
+
+(ert-deftest jj-diff-test-visit-file ()
+  "Test jumping to file and line with RET (jj-diff-visit-file)."
+  (let* ((temp-dir (make-temp-file "jj-diff-visit-test-" t))
+         (src-file (expand-file-name "test_jump.txt" temp-dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file src-file
+            (insert "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\n"))
+          (let ((diff-str (concat "diff --git a/test_jump.txt b/test_jump.txt\n"
+                                  "--- a/test_jump.txt\n"
+                                  "+++ b/test_jump.txt\n"
+                                  "@@ -3,3 +3,4 @@\n"
+                                  " line 3\n"
+                                  "-line 4\n"
+                                  "+line 4 modified\n"
+                                  "+line 4.5 added\n"
+                                  " line 5\n")))
+            (let ((diff-buf (get-buffer-create "*jj-diff-test-visit*")))
+              (unwind-protect
+                  (with-current-buffer diff-buf
+                    (jj-diff-mode)
+                    (setq jj-diff--repo-root temp-dir)
+                    (setq jj-diff--files (jj-diff--parse-unified-diff diff-str))
+                    (jj-diff--render-buffer)
+
+                    ;; 1. Jump from added line "+line 4.5 added" (should be line 5)
+                    (goto-char (point-min))
+                    (search-forward "+line 4.5 added")
+                    (jj-diff-visit-file)
+                    (should (string= (buffer-file-name) src-file))
+                    (should (= (line-number-at-pos) 5))
+                    (kill-buffer (current-buffer))
+
+                    ;; 2. Jump from deleted line "-line 4" should signal user-error
+                    (with-current-buffer diff-buf
+                      (goto-char (point-min))
+                      (search-forward "-line 4")
+                      (should-error (jj-diff-visit-file) :type 'user-error)))
+                (kill-buffer diff-buf)))))
+      (delete-directory temp-dir t))))
 
 (ert-deftest jj-diff-test-folding ()
   "Test hunk and file folding toggle."
