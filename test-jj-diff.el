@@ -789,5 +789,41 @@
               (should-not (string-match-p "beta modified" (buffer-string))))))
       (delete-directory temp-dir t))))
 
+(ert-deftest jj-diff-test-interactive-tool ()
+  "Test jj-diff-tool interactive diff-editor entry point."
+  (let* ((temp-l (make-temp-file "jj-tool-l-" t))
+         (temp-r (make-temp-file "jj-tool-r-" t))
+         (file-l (expand-file-name "test.txt" temp-l))
+         (file-r (expand-file-name "test.txt" temp-r)))
+    (unwind-protect
+        (progn
+          (with-temp-file file-l (insert "line 1\nline 2\nline 3\n"))
+          (with-temp-file file-r (insert "line 1 mod\nline 2\nline 3 mod\n"))
+
+          ;; 1. Launch jj-diff-tool
+          (let ((buf (jj-diff-tool temp-l temp-r)))
+            (with-current-buffer buf
+              (should (eq jj-diff--tool-mode t))
+              (should (= (length jj-diff--files) 1))
+
+              ;; Mark -line 3 and +line 3 mod
+              (goto-char (point-min))
+              (search-forward "-line 3")
+              (jj-diff-mark)
+              (goto-char (point-min))
+              (search-forward "+line 3 mod")
+              (jj-diff-mark)
+              (should (= (jj-diff-count-marked-lines) 2))
+
+              ;; Apply split
+              (jj-diff-tool-apply))
+
+            ;; 2. Verify target directory ($right) has line 1 unchanged from $left, and line 3 modified
+            (with-temp-buffer
+              (insert-file-contents file-r)
+              (should (string= (buffer-string) "line 1\nline 2\nline 3 mod\n")))))
+      (delete-directory temp-l t)
+      (delete-directory temp-r t))))
+
 (provide 'test-jj-diff)
 ;;; test-jj-diff.el ends here

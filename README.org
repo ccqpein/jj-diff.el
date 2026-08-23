@@ -36,6 +36,7 @@ With ~use-package~ with ~straight.el~:
 
 * Usage & Workflow
 
+** 1. Using inside Emacs
 1. *Open Diff*: Run =M-x jj-diff= inside any Jujutsu repository (or nested subdirectory; or provide a prefix argument =C-u M-x jj-diff= to specify a revision, which defaults to =@=).
 2. *Mark / Unmark*:
    - ~m~ / ~s~: Toggle mark on line, active region, hunk, or file.
@@ -45,7 +46,8 @@ With ~use-package~ with ~straight.el~:
 3. *Navigate & Fold*:
    - ~n~ / ~p~: Jump to next / previous hunk.
    - ~N~ / ~P~: Jump to next / previous file.
-   - ~TAB~ / ~RET~: Fold / unfold hunk or file.
+   - ~TAB~: Cycle fold levels (File ↔ Hunks ↔ All code).
+   - ~RET~: Jump to file and line in working tree (from ~+~ or context lines).
 4. *Commit*:
    - ~c~: Open commit description buffer (~*jj-commit-description*~).
    - Type your commit message.
@@ -55,6 +57,24 @@ With ~use-package~ with ~straight.el~:
    - ~g~: Refresh diff buffer.
    - ~q~: Quit / bury buffer.
    - ~?~: Describe mode / show keybindings.
+
+** 2. Using from Terminal (~jj split~ CLI Integration)
+To use ~jj-diff~ as your interactive diff editor whenever you run ~jj split~, ~jj squash -i~, ~jj restore -i~, or ~jj diff --interactive~ in your terminal, add the following to =~/.config/jj/config.toml=:
+
+#+BEGIN_SRC toml
+[ui]
+editor = "/Applications/Emacs.app/Contents/MacOS/bin/emacsclient -t"
+diff-editor = "jj-diff"
+
+[merge-tools.jj-diff]
+program = "/Applications/Emacs.app/Contents/MacOS/bin/emacsclient"
+edit-args = ["-a", "", "-t", "--eval", "(jj-diff-tool \"$left\" \"$right\")"]
+#+END_SRC
+
+When you run ~jj split .~ in your terminal:
+1. Emacs opens the interactive ~*jj-diff: split*~ buffer directly in your terminal.
+2. Mark the lines/hunks you want in the first commit (~m~ / ~s~).
+3. Press ~C-c C-c~ (or ~c~) to accept and commit the split, or ~C-c C-k~ (or ~q~) to cancel.
 
 * Keybindings Reference
 

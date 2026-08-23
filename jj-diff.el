@@ -16,6 +16,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'server nil t)
 
 ;;; Customization & Faces
 
@@ -185,6 +186,18 @@
 (defvar-local jj-diff--source-buffer nil
   "The originating `jj-diff` buffer when in commit description buffer.")
 
+(defvar-local jj-diff--tool-mode nil
+  "Non-nil if current buffer is running as an interactive Jujutsu diff-editor tool.")
+
+(defvar-local jj-diff--tool-left nil
+  "Path to baseline tree ($left) when running in tool mode.")
+
+(defvar-local jj-diff--tool-right nil
+  "Path to target tree ($right) when running in tool mode.")
+
+(defvar-local jj-diff--tool-frame nil
+  "Frame where the tool buffer was created (to close on exit).")
+
 ;;; Jujutsu Command Helpers
 
 (defun jj-diff--find-repo-root (&optional dir)
@@ -324,12 +337,21 @@
     (remove-overlays (point-min) (point-max))
 
     ;; Header info
-    (insert (propertize (format " Jujutsu Working Copy Diff (%s)\n" jj-diff--revision)
-                        'face 'jj-diff-status-bar))
-    (insert (propertize (format " Repository: %s\n" jj-diff--repo-root)
-                        'face 'jj-diff-meta-header))
-    (insert (propertize " [m/s] Mark  [u] Unmark  [M/S] Mark All  [U] Unmark All  [TAB] Fold  [S-TAB] Fold All  [RET] Visit  [c] Commit  [g] Refresh  [q] Quit\n\n"
-                        'face 'jj-diff-meta-header))
+    (if jj-diff--tool-mode
+        (progn
+          (insert (propertize " Jujutsu Interactive Split / Diff Editor\n"
+                              'face 'jj-diff-status-bar))
+          (insert (propertize (format " Baseline: %s  Target: %s\n"
+                                      jj-diff--tool-left jj-diff--tool-right)
+                              'face 'jj-diff-meta-header))
+          (insert (propertize " [m/s] Mark  [u] Unmark  [M/S] Mark All  [U] Unmark All  [TAB] Fold  [RET] Visit  [C-c C-c] / [c] Accept  [C-c C-k] / [q] Cancel\n\n"
+                              'face 'jj-diff-meta-header)))
+      (insert (propertize (format " Jujutsu Working Copy Diff (%s)\n" jj-diff--revision)
+                          'face 'jj-diff-status-bar))
+      (insert (propertize (format " Repository: %s\n" jj-diff--repo-root)
+                          'face 'jj-diff-meta-header))
+      (insert (propertize " [m/s] Mark  [u] Unmark  [M/S] Mark All  [U] Unmark All  [TAB] Fold  [S-TAB] Fold All  [RET] Visit  [c] Commit  [g] Refresh  [q] Quit\n\n"
+                          'face 'jj-diff-meta-header)))
 
     (if (null jj-diff--files)
         (insert (propertize " No working copy changes.\n" 'face 'italic))
@@ -859,21 +881,136 @@ On a file header: cycles File (1) -> Hunks (2) -> All code (3) -> Hunks (2) -> F
   "Copy all contents of SRC directory to DST directory, overwriting."
   (unless (file-directory-p dst)
     (make-directory dst t))
-  ;; Remove existing contents in DST
-  (dolist (file (directory-files dst t "^[^.]"))
-    (if (file-directory-p file)
-        (delete-directory file t)
-      (delete-file file)))
-  ;; Copy all files from SRC to DST
-  (dolist (file (directory-files src t "^[^.]"))
-    (let ((target (expand-file-name (file-name-nondirectory file) dst)))
-      (if (file-directory-p file)
-          (copy-directory file target nil t t)
-        (copy-file file target t t t))))
+  ;; Remove existing contents in DST (excluding . and ..)
+  (dolist (file (directory-files dst t nil t))
+    (let ((base (file-name-nondirectory file)))
+      (unless (member base '("." ".."))
+        (if (file-directory-p file)
+            (delete-directory file t)
+          (delete-file file)))))
+  ;; Copy all files from SRC to DST (including hidden files like .aaa, .gitignore, etc.)
+  (dolist (file (directory-files src t nil t))
+    (let ((base (file-name-nondirectory file)))
+      (unless (member base '("." ".."))
+        (let ((target (expand-file-name base dst)))
+          (if (file-directory-p file)
+              (copy-directory file target nil t t)
+            (copy-file file target t t t))))))
   ;; Make all files in DST writable
-  (dolist (file (directory-files-recursively dst ".*" t))
+  (dolist (file (directory-files-recursively dst ".*" t t))
     (unless (file-directory-p file)
       (set-file-modes file #o644))))
+
+(defun jj-diff--diff-directories (left right)
+  "Compute unified diff between LEFT and RIGHT directories with clean relative paths."
+  (let* ((left-clean (directory-file-name (file-truename left)))
+         (right-clean (directory-file-name (file-truename right)))
+         (git-bin (or (executable-find "git") "git"))
+         (raw-diff
+          (with-temp-buffer
+            (let ((exit-code (call-process git-bin nil t nil
+                                           "diff" "--no-index" "--no-color"
+                                           left-clean right-clean)))
+              (if (<= exit-code 1)
+                  (buffer-string)
+                (error "git diff --no-index failed with code %d:\n%s" exit-code (buffer-string))))))
+         (left-pat (regexp-quote left-clean))
+         (right-pat (regexp-quote right-clean)))
+    (with-temp-buffer
+      (insert raw-diff)
+      (goto-char (point-min))
+      (while (re-search-forward "^diff --git [^\n]+" nil t)
+        (let ((orig (match-string 0)))
+          (setq orig (replace-regexp-in-string (concat " a/?" left-pat "/?") " a/" orig))
+          (setq orig (replace-regexp-in-string (concat " b/?" right-pat "/?") " b/" orig))
+          (replace-match orig t t)))
+      (goto-char (point-min))
+      (while (re-search-forward "^--- [^\n]+" nil t)
+        (let ((orig (match-string 0)))
+          (setq orig (replace-regexp-in-string (concat " a/?" left-pat "/?") " a/" orig))
+          (replace-match orig t t)))
+      (goto-char (point-min))
+      (while (re-search-forward "^\\+\\+\\+ [^\n]+" nil t)
+        (let ((orig (match-string 0)))
+          (setq orig (replace-regexp-in-string (concat " b/?" right-pat "/?") " b/" orig))
+          (replace-match orig t t)))
+      (buffer-string))))
+
+;;;###autoload
+(defun jj-diff-tool (left right)
+  "Interactive Jujutsu diff-editor entry point for `jj split`, `jj squash -i`, etc.
+LEFT is the baseline tree directory ($left).
+RIGHT is the target split directory ($right)."
+  (interactive)
+  (let* ((left-dir (file-truename left))
+         (right-dir (file-truename right))
+         (buf-name "*jj-diff: split*")
+         (buf (get-buffer-create buf-name))
+         (frame (selected-frame))
+         (diff-text (jj-diff--diff-directories left-dir right-dir))
+         (files (jj-diff--parse-unified-diff diff-text)))
+    (with-current-buffer buf
+      (jj-diff-mode)
+      (setq-local jj-diff--tool-mode t)
+      (setq-local jj-diff--tool-left left-dir)
+      (setq-local jj-diff--tool-right right-dir)
+      (setq-local jj-diff--tool-frame frame)
+      (setq-local default-directory (file-name-as-directory right-dir))
+      (setq-local jj-diff--repo-root right-dir)
+      (setq-local jj-diff--files files)
+      (jj-diff--render-buffer))
+    (pop-to-buffer buf)
+    buf))
+
+(defun jj-diff-tool-apply ()
+  "Apply marked changes to target directory and finish interactive diff-editor session."
+  (interactive)
+  (unless jj-diff--tool-mode
+    (user-error "Not in interactive tool mode"))
+  (let* ((left jj-diff--tool-left)
+         (right jj-diff--tool-right)
+         (frame jj-diff--tool-frame)
+         (marked-count (jj-diff-count-marked-lines))
+         (patch (jj-diff--generate-selected-patch jj-diff--files))
+         (git-bin (or (executable-find "git") "git"))
+         (cur-buf (current-buffer)))
+    (when (zerop marked-count)
+      (user-error "No changes marked. Mark lines/hunks with 'm' before applying"))
+    ;; 1. Copy left to right
+    (jj-diff--copy-directory-contents left right)
+    ;; 2. Apply marked patch to right
+    (let ((patch-file (make-temp-file "jj-diff-tool-patch-")))
+      (unwind-protect
+          (progn
+            (with-temp-file patch-file
+              (insert patch))
+            (let ((default-directory (file-name-as-directory right)))
+              (let ((exit-code (call-process git-bin nil nil nil
+                                             "apply"
+                                             "--unsafe-paths"
+                                             "--whitespace=nowarn"
+                                             (expand-file-name patch-file))))
+                (unless (zerop exit-code)
+                  (error "git apply failed on marked patch (code %d)" exit-code)))))
+        (when (file-exists-p patch-file)
+          (delete-file patch-file))))
+    (message "Applied %d marked change line(s)." marked-count)
+    (kill-buffer cur-buf)
+    ;; If running inside a dedicated terminal frame created by emacsclient -t, close it
+    (when (and (frame-live-p frame)
+               (> (length (frame-list)) 1))
+      (delete-frame frame t))))
+
+(defun jj-diff-tool-cancel ()
+  "Cancel interactive diff-editor session without applying changes."
+  (interactive)
+  (let ((frame jj-diff--tool-frame)
+        (cur-buf (current-buffer)))
+    (kill-buffer cur-buf)
+    (when (and (frame-live-p frame)
+               (> (length (frame-list)) 1))
+      (delete-frame frame t))
+    (user-error "Split canceled")))
 
 (defun jj-diff--batch-apply (left right patch-file)
   "Batch entry point executed by Emacs when invoked as `jj split --tool` diff-editor.
@@ -883,16 +1020,17 @@ PATCH-FILE is the path to the selected unified diff patch."
   (condition-case err
       (progn
         (jj-diff--copy-directory-contents left right)
-        (let ((default-directory (file-name-as-directory right)))
-          (let ((exit-code (call-process "git" nil nil nil
-                                         "apply"
-                                         "--unsafe-paths"
-                                         "--whitespace=nowarn"
-                                         (expand-file-name patch-file))))
-            (if (zerop exit-code)
-                (kill-emacs 0)
-              (message "jj-diff: git apply failed with code %d" exit-code)
-              (kill-emacs 1)))))
+        (let* ((default-directory (file-name-as-directory right))
+               (git-bin (or (executable-find "git") "git"))
+               (exit-code (call-process git-bin nil nil nil
+                                        "apply"
+                                        "--unsafe-paths"
+                                        "--whitespace=nowarn"
+                                        (expand-file-name patch-file))))
+          (if (zerop exit-code)
+              (kill-emacs 0)
+            (message "jj-diff: git apply failed with code %d" exit-code)
+            (kill-emacs 1))))
     (error
      (message "jj-diff error in batch apply: %s" (error-message-string err))
      (kill-emacs 1))))
@@ -910,8 +1048,17 @@ PATCH-FILE is the path to the selected unified diff patch."
 (define-derived-mode jj-describe-mode text-mode "JJ-Describe"
   "Major mode for editing Jujutsu commit descriptions."
   (setq-local header-line-format
-              (propertize " Press C-c C-c to commit marked changes, C-c C-k to cancel."
-                          'face 'jj-diff-status-bar)))
+              (propertize " Press C-c C-c to save/commit, C-c C-k to cancel without committing."
+                          'face 'jj-diff-status-bar))
+  (when (fboundp 'with-editor-mode)
+    (with-editor-mode 1)))
+
+;;;###autoload
+(add-to-list 'auto-mode-alist '("\\.jjdescription\\'" . jj-describe-mode))
+;;;###autoload
+(add-to-list 'auto-mode-alist '("/editor-[^/]+\\'" . jj-describe-mode))
+;;;###autoload
+(add-to-list 'auto-mode-alist '("/jj-description-[^/]+\\'" . jj-describe-mode))
 
 (defun jj-diff-commit ()
   "Open description buffer for marked changes."
@@ -934,69 +1081,110 @@ PATCH-FILE is the path to the selected unified diff patch."
         (pop-to-buffer desc-buf)))))
 
 (defun jj-diff-commit-cancel ()
-  "Cancel commit description and close buffer."
+  "Cancel commit description and abort the operation.
+When invoked from an external Jujutsu emacsclient session, sends an error signal
+and deletes the temporary description file so Jujutsu aborts without committing."
   (interactive)
-  (let ((desc-buf (current-buffer)))
-    (quit-window t (get-buffer-window desc-buf))
-    (message "Commit canceled.")))
+  (if (and (fboundp 'with-editor-cancel) (boundp 'with-editor-mode) with-editor-mode)
+      (with-editor-cancel nil)
+    (if buffer-file-name
+        (let ((clients (or (and (boundp 'server-buffer-clients) (copy-sequence server-buffer-clients))
+                           (and (boundp 'server-clients) (copy-sequence server-clients))))
+              (frame (selected-frame))
+              (file buffer-file-name)
+              (cur-buf (current-buffer)))
+          ;; 1. Detach server-buffer-clients so kill-buffer-hook won't trigger server-buffer-done
+          (setq-local server-buffer-clients nil)
+          ;; 2. Erase buffer and delete the temp description file
+          (erase-buffer)
+          (set-buffer-modified-p nil)
+          (ignore-errors (delete-file file))
+          ;; 3. Signal abort error to emacsclient process so it exits with non-zero code
+          (dolist (proc clients)
+            (when (process-live-p proc)
+              (ignore-errors
+                (server-send-string proc "-error Aborted by user\n")
+                (server-delete-client proc))))
+          ;; 4. Close dedicated frame if applicable
+          (when (and (frame-live-p frame) (> (length (frame-list)) 1))
+            (delete-frame frame t))
+          (ignore-errors (kill-buffer cur-buf))
+          (message "Commit description canceled."))
+      (let ((desc-buf (current-buffer)))
+        (quit-window t (get-buffer-window desc-buf))
+        (message "Commit canceled.")))))
 
 (defun jj-diff-commit-apply ()
-  "Execute `jj split` non-interactively using the selected patch and message."
+  "Apply commit description and finish editing.
+Handles both internal diff buffers and external Jujutsu server files."
   (interactive)
-  (let* ((desc-raw (buffer-substring-no-properties (point-min) (point-max)))
-         (desc-lines (cl-remove-if (lambda (l) (string-prefix-p "#" (string-trim l)))
-                                  (split-string desc-raw "\n")))
-         (message-text (string-trim (mapconcat #'identity desc-lines "\n")))
-         (source-buf jj-diff--source-buffer))
-    (when (string-empty-p message-text)
-      (user-error "Commit message cannot be empty"))
-    (unless (and source-buf (buffer-live-p source-buf))
-      (user-error "Source jj-diff buffer is no longer available"))
+  (if (and (fboundp 'with-editor-finish) (boundp 'with-editor-mode) with-editor-mode)
+      (with-editor-finish nil)
+    (if buffer-file-name
+        ;; External file from Jujutsu editor (e.g. .jjdescription via emacsclient)
+        (let ((frame (selected-frame)))
+          (save-buffer)
+          (if (and (fboundp 'server-edit)
+                   (boundp 'server-buffer-clients)
+                   server-buffer-clients)
+              (server-edit)
+            (quit-window t (selected-window)))
+          (when (and (frame-live-p frame) (> (length (frame-list)) 1))
+            (delete-frame frame t)))
+    ;; Internal jj-diff session
+    (let* ((desc-raw (buffer-substring-no-properties (point-min) (point-max)))
+           (desc-lines (cl-remove-if (lambda (l) (string-prefix-p "#" (string-trim l)))
+                                    (split-string desc-raw "\n")))
+           (message-text (string-trim (mapconcat #'identity desc-lines "\n")))
+           (source-buf jj-diff--source-buffer))
+      (when (string-empty-p message-text)
+        (user-error "Commit message cannot be empty"))
+      (unless (and source-buf (buffer-live-p source-buf))
+        (user-error "Source diff buffer is no longer available"))
+      (let* ((repo-root (with-current-buffer source-buf jj-diff--repo-root))
+             (revision (with-current-buffer source-buf jj-diff--revision))
+             (files (with-current-buffer source-buf jj-diff--files))
+             (patch-file (make-temp-file "jj-diff-patch-" nil ".diff"))
+             (this-el-file (or (locate-library "jj-diff")
+                               (buffer-file-name (get-file-buffer "jj-diff.el"))
+                               (expand-file-name "jj-diff.el" repo-root))))
 
-    (let ((repo-root (with-current-buffer source-buf jj-diff--repo-root))
-          (files (with-current-buffer source-buf jj-diff--files))
-          (revision (with-current-buffer source-buf jj-diff--revision))
-          (patch-file (make-temp-file "jj-diff-patch-" nil ".diff"))
-          (this-el-file (or (locate-library "jj-diff")
-                            (buffer-file-name (get-file-buffer "jj-diff.el"))
-                            (expand-file-name "jj-diff.el" repo-root))))
-
-      ;; 1. Generate patch string and write to temporary file
-      (let ((patch-str (with-current-buffer source-buf
-                         (jj-diff--generate-selected-patch files))))
-        (when (string-empty-p (string-trim patch-str))
-          (delete-file patch-file)
-          (user-error "Generated patch is empty; no changes marked"))
-        (with-temp-file patch-file
-          (insert patch-str)))
-
-      ;; 2. Run jj split non-interactively
-      (message "Running `jj split`...")
-      (let* ((emacs-bin jj-diff-emacs-executable)
-             (eval-form (format "(progn (require 'jj-diff) (jj-diff--batch-apply \"$left\" \"$right\" %S))"
-                                patch-file))
-             (edit-args-val (format "[\"--batch\", \"-Q\", \"-l\", %S, \"--eval\", %S]"
-                                    this-el-file
-                                    eval-form))
-             (args (list "-R" repo-root
-                         "split"
-                         "-r" revision
-                         "--tool" "jj-emacs-split"
-                         "--config" "ui.diff-instructions=false"
-                         "--config" (format "merge-tools.jj-emacs-split.program=%S" emacs-bin)
-                         "--config" (format "merge-tools.jj-emacs-split.edit-args=%s" edit-args-val)
-                         "-m" message-text)))
-        (with-temp-buffer
-          (let ((exit-code (apply #'call-process jj-diff-executable nil (list t t) nil args)))
+        ;; 1. Generate patch string and write to temporary file
+        (let ((patch-str (with-current-buffer source-buf
+                           (jj-diff--generate-selected-patch files))))
+          (when (string-empty-p (string-trim patch-str))
             (delete-file patch-file)
-            (if (zerop exit-code)
-                (progn
-                  (quit-window t (selected-window))
-                  (with-current-buffer source-buf
-                    (jj-diff-refresh))
-                  (message "Successfully committed marked changes."))
-              (let ((err-out (buffer-string)))
-                (error "jj split failed:\n%s" err-out)))))))))
+            (user-error "Generated patch is empty; no changes marked"))
+          (with-temp-file patch-file
+            (insert patch-str)))
+
+        ;; 2. Run jj split non-interactively
+        (message "Running `jj split`...")
+        (let* ((emacs-bin jj-diff-emacs-executable)
+               (eval-form (format "(progn (require 'jj-diff) (jj-diff--batch-apply \"$left\" \"$right\" %S))"
+                                  patch-file))
+               (edit-args-val (format "[\"--batch\", \"-Q\", \"-l\", %S, \"--eval\", %S]"
+                                      this-el-file
+                                      eval-form))
+               (args (list "-R" repo-root
+                           "split"
+                           "-r" revision
+                           "--tool" "jj-emacs-split"
+                           "--config" "ui.diff-instructions=false"
+                           "--config" (format "merge-tools.jj-emacs-split.program=%S" emacs-bin)
+                           "--config" (format "merge-tools.jj-emacs-split.edit-args=%s" edit-args-val)
+                           "-m" message-text)))
+          (with-temp-buffer
+            (let ((exit-code (apply #'call-process jj-diff-executable nil (list t t) nil args)))
+              (delete-file patch-file)
+              (if (zerop exit-code)
+                  (progn
+                    (quit-window t (selected-window))
+                    (with-current-buffer source-buf
+                      (jj-diff-refresh))
+                    (message "Successfully committed marked changes."))
+                (let ((err-out (buffer-string)))
+                  (error "jj split failed:\n%s" err-out)))))))))))
 
 ;;; Keymap & Major Mode
 
@@ -1047,6 +1235,21 @@ With optional prefix ARG (OTHER-WINDOW), open in another window."
 
 (defalias 'jj-diff-jump #'jj-diff-visit-file)
 
+(defun jj-diff-commit-or-tool-apply ()
+  "Apply marked changes in tool mode, or open description buffer in regular diff mode."
+  (interactive)
+  (if jj-diff--tool-mode
+      (jj-diff-tool-apply)
+    (jj-diff-commit)))
+
+(defun jj-diff-quit ()
+  "Quit the current diff buffer, prompting if in tool mode."
+  (interactive)
+  (if jj-diff--tool-mode
+      (when (y-or-n-p "Cancel interactive split / diff-editor session? ")
+        (jj-diff-tool-cancel))
+    (quit-window)))
+
 (defvar jj-diff-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "TAB") #'jj-diff-toggle-fold)
@@ -1069,9 +1272,11 @@ With optional prefix ARG (OTHER-WINDOW), open in another window."
     (define-key map (kbd "p") #'jj-diff-prev-hunk)
     (define-key map (kbd "N") #'jj-diff-next-file)
     (define-key map (kbd "P") #'jj-diff-prev-file)
-    (define-key map (kbd "c") #'jj-diff-commit)
+    (define-key map (kbd "c") #'jj-diff-commit-or-tool-apply)
+    (define-key map (kbd "C-c C-c") #'jj-diff-commit-or-tool-apply)
+    (define-key map (kbd "C-c C-k") #'jj-diff-tool-cancel)
     (define-key map (kbd "g") #'jj-diff-refresh)
-    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "q") #'jj-diff-quit)
     (define-key map (kbd "?") #'describe-mode)
     map)
   "Keymap for `jj-diff-mode`.")
