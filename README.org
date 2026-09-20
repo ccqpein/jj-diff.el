@@ -91,6 +91,7 @@ When you run ~jj split .~ in your terminal:
 | ~n~ / ~p~ | ~jj-diff-next-hunk~               | Move to next / previous hunk                                 |
 | ~N~ / ~P~ | ~jj-diff-next-file~               | Move to next / previous file                                 |
 | ~c~     | ~jj-diff-commit~                  | Open commit description buffer                               |
+| ~v~ / ~C-c C-p~ | ~jj-diff-show-patch~        | Preview generated patch for marked changes                   |
 | ~g~     | ~jj-diff-refresh~                 | Refresh working copy diff                                    |
 | ~q~     | ~quit-window~                     | Close diff buffer                                            |
 | ~?~     | ~describe-mode~                   | View keymap & mode help                                      |

@@ -825,5 +825,154 @@
       (delete-directory temp-l t)
       (delete-directory temp-r t))))
 
+(ert-deftest jj-diff-test-noeol ()
+  "Test parsing and patch generation for files without trailing newline."
+  (let ((diff-str (concat "diff --git a/noeol.txt b/noeol.txt\n"
+                          "--- a/noeol.txt\n"
+                          "+++ b/noeol.txt\n"
+                          "@@ -1,1 +1,1 @@\n"
+                          "-hello\n"
+                          "\\ No newline at end of file\n"
+                          "+world\n"
+                          "\\ No newline at end of file\n")))
+    (let* ((files (jj-diff--parse-unified-diff diff-str))
+           (file (car files))
+           (hunk (car (jj-diff-file-hunks file)))
+           (lines (jj-diff-hunk-lines hunk)))
+      (should (= (length lines) 2))
+      (should (eq (jj-diff-line-type (nth 0 lines)) :del))
+      (should (jj-diff-line-no-newline (nth 0 lines)))
+      (should (eq (jj-diff-line-type (nth 1 lines)) :add))
+      (should (jj-diff-line-no-newline (nth 1 lines)))
+      ;; Mark both
+      (setf (jj-diff-line-marked (nth 0 lines)) t)
+      (setf (jj-diff-line-marked (nth 1 lines)) t)
+      (let ((patch (jj-diff--generate-selected-patch files)))
+        (should (string-match-p "\\\\ No newline at end of file" patch))
+        (should (string-match-p "@@ -1,1 \\+1,1 @@" patch))
+        ;; Verify leading space was NOT prepended to \ No newline
+        (should-not (string-match-p " \\\\ No newline" patch))))))
+
+(ert-deftest jj-diff-test-partial-deleted-file ()
+  "Test generating patch when only a subset of lines in a deleted file are marked."
+  (let ((diff-str (concat "diff --git a/deleted.txt b/deleted.txt\n"
+                          "deleted file mode 100644\n"
+                          "--- a/deleted.txt\n"
+                          "+++ /dev/null\n"
+                          "@@ -1,3 +0,0 @@\n"
+                          "-line 1\n"
+                          "-line 2\n"
+                          "-line 3\n")))
+    (let* ((files (jj-diff--parse-unified-diff diff-str))
+           (file (car files))
+           (hunk (car (jj-diff-file-hunks file)))
+           (lines (jj-diff-hunk-lines hunk)))
+      ;; Mark only line 1 deletion
+      (setf (jj-diff-line-marked (nth 0 lines)) t)
+      (let ((patch (jj-diff--generate-selected-patch files)))
+        ;; When partially deleted, must NOT have "deleted file mode" or "+++ /dev/null"
+        (should-not (string-match-p "deleted file mode" patch))
+        (should-not (string-match-p "\\+\\+\\+ /dev/null" patch))
+        (should (string-match-p "\\+\\+\\+ b/deleted\\.txt" patch))
+        ;; Hunk new-count should be 2 (the 2 remaining context lines)
+        (should (string-match-p "@@ -1,3 \\+1,2 @@" patch))))))
+
+(ert-deftest jj-diff-test-multi-hunk-running-delta ()
+  "Test that running-delta adjusts new-start across multiple hunks."
+  (let ((diff-str (concat "diff --git a/multi.txt b/multi.txt\n"
+                          "--- a/multi.txt\n"
+                          "+++ b/multi.txt\n"
+                          "@@ -10,2 +10,3 @@\n"
+                          " line 10\n"
+                          "-line 11\n"
+                          "+line 11 mod\n"
+                          "+line 11.5 add\n"
+                          "@@ -50,2 +51,2 @@\n"
+                          " line 50\n"
+                          "-line 51\n"
+                          "+line 51 mod\n")))
+    (let* ((files (jj-diff--parse-unified-diff diff-str))
+           (file (car files))
+           (hunk1 (nth 0 (jj-diff-file-hunks file)))
+           (hunk2 (nth 1 (jj-diff-file-hunks file))))
+      ;; Case A: Mark only Hunk 2
+      (setf (jj-diff-line-marked (nth 2 (jj-diff-hunk-lines hunk2))) t) ; +line 51 mod
+      (setf (jj-diff-line-marked (nth 1 (jj-diff-hunk-lines hunk2))) t) ; -line 51
+      (let ((patch (jj-diff--generate-selected-patch files)))
+        ;; Hunk 2 new-start should be 50 (since hunk 1 wasn't applied), NOT 51
+        (should (string-match-p "@@ -50,2 \\+50,2 @@" patch)))
+
+      ;; Case B: Mark both Hunk 1 and Hunk 2
+      (setf (jj-diff-line-marked (nth 1 (jj-diff-hunk-lines hunk1))) t) ; -line 11
+      (setf (jj-diff-line-marked (nth 2 (jj-diff-hunk-lines hunk1))) t) ; +line 11 mod
+      (setf (jj-diff-line-marked (nth 3 (jj-diff-hunk-lines hunk1))) t) ; +line 11.5 add
+      (let ((patch (jj-diff--generate-selected-patch files)))
+        ;; Hunk 1 adds 1 line net (old 2, new 3), so Hunk 2 starts at 50 + 1 = 51
+        (should (string-match-p "@@ -10,2 \\+10,3 @@" patch))
+        (should (string-match-p "@@ -50,2 \\+51,2 @@" patch))))))
+
+(ert-deftest jj-diff-test-e2e-noeol-split ()
+  "Test end-to-end split commit on a file with no trailing newline."
+  (let* ((temp-dir (make-temp-file "jj-diff-noeol-e2e-" t))
+         (file-path (expand-file-name "noeol.txt" temp-dir)))
+    (unwind-protect
+        (progn
+          (should (zerop (call-process "jj" nil nil nil "git" "init" temp-dir)))
+          (with-temp-file file-path (insert "line 1"))
+          (should (zerop (call-process "jj" nil nil nil "-R" temp-dir "commit" "-m" "c1")))
+          (with-temp-file file-path (insert "line 1 modified"))
+
+          (let ((diff-buf (get-buffer-create "*jj-diff-test-noeol*"))
+                (desc-buf (get-buffer-create "*jj-commit-description*")))
+            (with-current-buffer diff-buf
+              (jj-diff-mode)
+              (setq default-directory (file-name-as-directory temp-dir))
+              (setq jj-diff--repo-root temp-dir)
+              (setq jj-diff--revision "@")
+              (jj-diff-refresh)
+              (should (> (length jj-diff--files) 0))
+
+              (goto-char (point-min))
+              (search-forward "+line 1 modified")
+              (jj-diff-mark)
+              (goto-char (point-min))
+              (search-forward "-line 1")
+              (jj-diff-mark)
+              (should (= (jj-diff-count-marked-lines) 2))
+              (jj-diff-commit))
+
+            (with-current-buffer desc-buf
+              (goto-char (point-min))
+              (insert "Commit noeol modification\n")
+              (jj-diff-commit-apply))
+
+            (with-temp-buffer
+              (should (zerop (call-process "jj" nil t nil "-R" temp-dir "diff" "-r" "@-")))
+              (should (string-match-p "line 1 modified" (buffer-string))))))
+      (delete-directory temp-dir t))))
+
+(ert-deftest jj-diff-test-show-patch ()
+  "Test previewing patch with jj-diff-show-patch."
+  (let ((diff-str (concat "diff --git a/test.txt b/test.txt\n"
+                          "--- a/test.txt\n"
+                          "+++ b/test.txt\n"
+                          "@@ -1,1 +1,1 @@\n"
+                          "-old\n"
+                          "+new\n")))
+    (with-temp-buffer
+      (jj-diff-mode)
+      (setq jj-diff--files (jj-diff--parse-unified-diff diff-str))
+      (jj-diff--render-buffer)
+      (goto-char (point-min))
+      (search-forward "+new")
+      (jj-diff-mark)
+      (save-window-excursion
+        (jj-diff-show-patch)
+        (let ((buf (get-buffer "*jj-diff: patch preview*")))
+          (should buf)
+          (with-current-buffer buf
+            (should (string-match-p "\\+new" (buffer-string))))
+          (when buf (kill-buffer buf)))))))
+
 (provide 'test-jj-diff)
 ;;; test-jj-diff.el ends here

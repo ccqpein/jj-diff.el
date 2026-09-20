@@ -167,7 +167,8 @@
   new-line-num
   beg-pos
   end-pos
-  overlay)
+  overlay
+  no-newline)   ; t or nil: true if followed by "\ No newline at end of file"
 
 ;;; Buffer-local Variables
 
@@ -226,7 +227,7 @@
 
 (defun jj-diff--parse-unified-diff (diff-text)
   "Parse raw unified DIFF-TEXT into a list of `jj-diff-file' structs."
-  (let ((lines (split-string diff-text "\n" nil))
+  (let ((lines (split-string diff-text "\r?\n" nil))
         (files nil)
         (current-file nil)
         (current-hunk nil)
@@ -234,15 +235,18 @@
         (cur-new-line 1))
     (dolist (line lines)
       (cond
-       ;; Start of a file diff: "diff --git a/... b/..."
-       ((string-match "^diff --git a/\\(.*\\) b/\\(.*\\)$" line)
-        (setq current-hunk nil)
-        (setq current-file (jj-diff-file-create
-                            :old-path (match-string 1 line)
-                            :new-path (match-string 2 line)
-                            :meta-lines (list line)
-                            :hunks nil))
-        (push current-file files))
+       ;; Start of a file diff: "diff --git a/... b/..." or "diff --git \"a/...\" \"b/...\""
+       ((or (string-match "^diff --git \"a/\\(.*\\)\" \"b/\\(.*\\)\"$" line)
+            (string-match "^diff --git a/\\(.*\\) b/\\(.*\\)$" line))
+        (let ((old-path (or (match-string 1 line) (match-string 3 line)))
+              (new-path (or (match-string 2 line) (match-string 4 line))))
+          (setq current-hunk nil)
+          (setq current-file (jj-diff-file-create
+                              :old-path old-path
+                              :new-path new-path
+                              :meta-lines (list line)
+                              :hunks nil))
+          (push current-file files)))
 
        ;; Check for new file / deleted file modes
        ((and current-file (string-match "^new file mode" line))
@@ -260,7 +264,10 @@
                  (string-prefix-p "--- " line)
                  (string-prefix-p "+++ " line)
                  (string-prefix-p "old mode" line)
-                 (string-prefix-p "new mode" line)))
+                 (string-prefix-p "new mode" line)
+                 (string-prefix-p "similarity index" line)
+                 (string-prefix-p "rename " line)
+                 (string-prefix-p "copy " line)))
         (push line (jj-diff-file-meta-lines current-file)))
 
        ;; Start of a hunk: "@@ -old_start,old_count +new_start,new_count @@"
@@ -288,17 +295,24 @@
             (setf (jj-diff-file-hunks current-file)
                   (append (jj-diff-file-hunks current-file) (list hunk))))))
 
+       ;; Special: "\ No newline at end of file"
+       ((and current-hunk
+             (string-prefix-p "\\" line))
+        (let ((last-line (car (last (jj-diff-hunk-lines current-hunk)))))
+          (when last-line
+            (setf (jj-diff-line-no-newline last-line) t))))
+
        ;; Content lines inside a hunk
        ((and current-hunk
              (or (string-prefix-p "+" line)
                  (string-prefix-p "-" line)
-                 (string-prefix-p " " line)
-                 (string-prefix-p "\\" line)))
+                 (string-prefix-p " " line)))
         (let* ((prefix (substring line 0 1))
                (type (cond
                       ((string= prefix "+") :add)
                       ((string= prefix "-") :del)
                       (t :context)))
+               (clean-line line)
                (old-num nil)
                (new-num nil))
           (cl-case type
@@ -317,10 +331,11 @@
           (let ((diff-line (jj-diff-line-create
                             :hunk current-hunk
                             :type type
-                            :text line
+                            :text clean-line
                             :old-line-num old-num
                             :new-line-num new-num
-                            :marked nil)))
+                            :marked nil
+                            :no-newline nil)))
             (setf (jj-diff-hunk-lines current-hunk)
                   (append (jj-diff-hunk-lines current-hunk) (list diff-line))))))))
     (nreverse files)))
@@ -407,7 +422,13 @@
                   (setf (jj-diff-line-overlay line) ov)
                   (jj-diff--update-line-overlay line))
 
-                (push line all-lines))))
+                (push line all-lines))
+              (when (jj-diff-line-no-newline line)
+                (let ((noeol-start (point)))
+                  (insert "\\ No newline at end of file\n")
+                  (put-text-property noeol-start (point) 'face 'jj-diff-meta-header)
+                  (put-text-property noeol-start (point) 'jj-diff-file file)
+                  (put-text-property noeol-start (point) 'jj-diff-hunk hunk)))))
           (setf (jj-diff-hunk-body-end-pos hunk) (point))
           (setf (jj-diff-hunk-end-pos hunk) (point))
           (let ((ov (make-overlay (jj-diff-hunk-body-beg-pos hunk) (jj-diff-hunk-body-end-pos hunk))))
@@ -804,7 +825,10 @@ On a file header: cycles File (1) -> Hunks (2) -> All code (3) -> Hunks (2) -> F
   "Generate a unified diff patch string containing ONLY the marked lines from FILES."
   (with-temp-buffer
     (dolist (file files)
-      (let ((file-hunk-patches nil))
+      (let ((file-hunk-patches nil)
+            (running-delta 0)
+            (file-total-new-lines 0)
+            (file-has-marked-changes nil))
         (dolist (hunk (jj-diff-file-hunks file))
           (let ((selected-lines nil)
                 (has-marked-change nil)
@@ -813,16 +837,21 @@ On a file header: cycles File (1) -> Hunks (2) -> All code (3) -> Hunks (2) -> F
             (dolist (line (jj-diff-hunk-lines hunk))
               (let ((type (jj-diff-line-type line))
                     (marked (jj-diff-line-marked line))
-                    (text (jj-diff-line-text line)))
+                    (text (jj-diff-line-text line))
+                    (noeol (jj-diff-line-no-newline line)))
                 (cond
                  ;; Context line: always included as context
                  ((eq type ':context)
                   (push (if (string-prefix-p " " text) text (concat " " text)) selected-lines)
+                  (when noeol
+                    (push "\\ No newline at end of file" selected-lines))
                   (cl-incf new-count))
 
                  ;; Marked addition: included as '+'
                  ((and (eq type ':add) marked)
                   (push (if (string-prefix-p "+" text) text (concat "+" text)) selected-lines)
+                  (when noeol
+                    (push "\\ No newline at end of file" selected-lines))
                   (cl-incf new-count)
                   (setq has-marked-change t))
 
@@ -834,6 +863,8 @@ On a file header: cycles File (1) -> Hunks (2) -> All code (3) -> Hunks (2) -> F
                  ;; Marked deletion: included as '-'
                  ((and (eq type ':del) marked)
                   (push (if (string-prefix-p "-" text) text (concat "-" text)) selected-lines)
+                  (when noeol
+                    (push "\\ No newline at end of file" selected-lines))
                   (setq has-marked-change t))
 
                  ;; Unmarked deletion: kept as context ' '
@@ -842,35 +873,48 @@ On a file header: cycles File (1) -> Hunks (2) -> All code (3) -> Hunks (2) -> F
                                      (substring text 1)
                                    text)))
                     (push (concat " " content) selected-lines)
+                    (when noeol
+                      (push "\\ No newline at end of file" selected-lines))
                     (cl-incf new-count))))))
 
             ;; If this hunk contains at least one marked change, generate hunk header and content
             (when has-marked-change
+              (setq file-has-marked-changes t)
               (let* ((old-start (jj-diff-hunk-old-start hunk))
-                     (new-start (jj-diff-hunk-new-start hunk))
+                     (new-start (if (zerop old-start) 1 (+ old-start running-delta)))
                      (hunk-hdr (format "@@ -%d,%d +%d,%d @@"
                                        old-start old-count
-                                       new-start new-count))
+                                       (if (zerop new-count) 0 new-start)
+                                       new-count))
                      (hunk-body (mapconcat #'identity (nreverse selected-lines) "\n")))
+                (cl-incf running-delta (- new-count old-count))
+                (cl-incf file-total-new-lines new-count)
                 (push (concat hunk-hdr "\n" hunk-body "\n") file-hunk-patches)))))
 
         ;; If file had marked changes, output file headers + hunk patches
-        (when file-hunk-patches
+        (when file-has-marked-changes
           (let ((old-path (jj-diff-file-old-path file))
                 (new-path (jj-diff-file-new-path file)))
             (insert (format "diff --git a/%s b/%s\n" old-path new-path))
-            (if (jj-diff-file-is-new file)
-                (progn
-                  (insert "new file mode 100644\n")
-                  (insert "--- /dev/null\n")
-                  (insert (format "+++ b/%s\n" new-path)))
-              (if (jj-diff-file-is-deleted file)
-                  (progn
-                    (insert "deleted file mode 100644\n")
-                    (insert (format "--- a/%s\n" old-path))
-                    (insert "+++ /dev/null\n"))
-                (insert (format "--- a/%s\n" old-path))
+            (cond
+             ((jj-diff-file-is-new file)
+              (let ((mode-line (or (cl-find-if (lambda (l) (string-prefix-p "new file mode" l))
+                                               (jj-diff-file-meta-lines file))
+                                   "new file mode 100644")))
+                (insert (format "%s\n" mode-line))
+                (insert "--- /dev/null\n")
                 (insert (format "+++ b/%s\n" new-path))))
+             ;; Only treat as deleted file if all content was deleted (new-lines = 0)
+             ((and (jj-diff-file-is-deleted file) (zerop file-total-new-lines))
+              (let ((mode-line (or (cl-find-if (lambda (l) (string-prefix-p "deleted file mode" l))
+                                               (jj-diff-file-meta-lines file))
+                                   "deleted file mode 100644")))
+                (insert (format "%s\n" mode-line))
+                (insert (format "--- a/%s\n" old-path))
+                (insert "+++ /dev/null\n")))
+             (t
+              (insert (format "--- a/%s\n" old-path))
+              (insert (format "+++ b/%s\n" new-path))))
             (dolist (hp (nreverse file-hunk-patches))
               (insert hp))))))
     (buffer-string)))
@@ -885,21 +929,25 @@ On a file header: cycles File (1) -> Hunks (2) -> All code (3) -> Hunks (2) -> F
   (dolist (file (directory-files dst t nil t))
     (let ((base (file-name-nondirectory file)))
       (unless (member base '("." ".."))
-        (if (file-directory-p file)
-            (delete-directory file t)
-          (delete-file file)))))
+        (cond
+         ((file-symlink-p file) (delete-file file))
+         ((file-directory-p file) (delete-directory file t))
+         (t (delete-file file))))))
   ;; Copy all files from SRC to DST (including hidden files like .aaa, .gitignore, etc.)
   (dolist (file (directory-files src t nil t))
     (let ((base (file-name-nondirectory file)))
       (unless (member base '("." ".."))
         (let ((target (expand-file-name base dst)))
-          (if (file-directory-p file)
-              (copy-directory file target nil t t)
-            (copy-file file target t t t))))))
-  ;; Make all files in DST writable
+          (cond
+           ((file-symlink-p file) (copy-file file target t t t))
+           ((file-directory-p file) (copy-directory file target nil t t))
+           (t (copy-file file target t t t)))))))
+  ;; Make all files in DST writable while preserving execute bits
   (dolist (file (directory-files-recursively dst ".*" t t))
-    (unless (file-directory-p file)
-      (set-file-modes file #o644))))
+    (unless (or (file-directory-p file) (file-symlink-p file))
+      (let ((modes (file-modes file)))
+        (when modes
+          (set-file-modes file (logior modes #o600)))))))
 
 (defun jj-diff--diff-directories (left right)
   "Compute unified diff between LEFT and RIGHT directories with clean relative paths."
@@ -984,14 +1032,24 @@ RIGHT is the target split directory ($right)."
           (progn
             (with-temp-file patch-file
               (insert patch))
-            (let ((default-directory (file-name-as-directory right)))
-              (let ((exit-code (call-process git-bin nil nil nil
-                                             "apply"
-                                             "--unsafe-paths"
-                                             "--whitespace=nowarn"
-                                             (expand-file-name patch-file))))
-                (unless (zerop exit-code)
-                  (error "git apply failed on marked patch (code %d)" exit-code)))))
+            (let* ((default-directory (file-name-as-directory right))
+                   (err-buf (generate-new-buffer " *jj-tool-git-apply*"))
+                   (exit-code (unwind-protect
+                                  (call-process git-bin nil err-buf nil
+                                                "apply"
+                                                "--unsafe-paths"
+                                                "--whitespace=nowarn"
+                                                "--recount"
+                                                "--allow-empty"
+                                                (expand-file-name patch-file))
+                                nil))
+                   (git-output (with-current-buffer err-buf (string-trim (buffer-string)))))
+              (kill-buffer err-buf)
+              (unless (zerop exit-code)
+                (error "git apply failed on marked patch (code %d):\n%s\n--- Generated Patch ---\n%s"
+                       exit-code
+                       (if (string-empty-p git-output) "(no stderr output)" git-output)
+                       patch))))
         (when (file-exists-p patch-file)
           (delete-file patch-file))))
     (message "Applied %d marked change line(s)." marked-count)
@@ -1022,15 +1080,30 @@ PATCH-FILE is the path to the selected unified diff patch."
         (jj-diff--copy-directory-contents left right)
         (let* ((default-directory (file-name-as-directory right))
                (git-bin (or (executable-find "git") "git"))
-               (exit-code (call-process git-bin nil nil nil
-                                        "apply"
-                                        "--unsafe-paths"
-                                        "--whitespace=nowarn"
-                                        (expand-file-name patch-file))))
+               (err-buf (generate-new-buffer " *jj-git-apply*"))
+               (exit-code (unwind-protect
+                              (call-process git-bin nil err-buf nil
+                                            "apply"
+                                            "--unsafe-paths"
+                                            "--whitespace=nowarn"
+                                            "--recount"
+                                            "--allow-empty"
+                                            (expand-file-name patch-file))
+                            nil))
+               (git-output (with-current-buffer err-buf
+                             (string-trim (buffer-string)))))
+          (kill-buffer err-buf)
           (if (zerop exit-code)
               (kill-emacs 0)
-            (message "jj-diff: git apply failed with code %d" exit-code)
-            (kill-emacs 1))))
+            (let ((patch-content (ignore-errors
+                                   (with-temp-buffer
+                                     (insert-file-contents patch-file)
+                                     (buffer-string)))))
+              (message "jj-diff: git apply failed with code %d:\n%s\n--- Generated Patch ---\n%s"
+                       exit-code
+                       (if (string-empty-p git-output) "(no stderr output)" git-output)
+                       (or patch-content "(could not read patch file)"))
+              (kill-emacs 1)))))
     (error
      (message "jj-diff error in batch apply: %s" (error-message-string err))
      (kill-emacs 1))))
@@ -1041,6 +1114,7 @@ PATCH-FILE is the path to the selected unified diff patch."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'jj-diff-commit-apply)
     (define-key map (kbd "C-c C-k") #'jj-diff-commit-cancel)
+    (define-key map (kbd "C-c C-p") #'jj-diff-show-patch)
     map)
   "Keymap for `jj-describe-mode`.")
 
@@ -1166,7 +1240,9 @@ Handles both internal diff buffers and external Jujutsu server files."
                (edit-args-val (format "[\"--batch\", \"-Q\", \"-l\", %S, \"--eval\", %S]"
                                       this-el-file
                                       eval-form))
-               (args (list "-R" repo-root
+               (args (list "--color=never"
+                           "--no-pager"
+                           "-R" repo-root
                            "split"
                            "-r" revision
                            "--tool" "jj-emacs-split"
@@ -1176,15 +1252,16 @@ Handles both internal diff buffers and external Jujutsu server files."
                            "-m" message-text)))
           (with-temp-buffer
             (let ((exit-code (apply #'call-process jj-diff-executable nil (list t t) nil args)))
-              (delete-file patch-file)
               (if (zerop exit-code)
                   (progn
+                    (delete-file patch-file)
                     (quit-window t (selected-window))
                     (with-current-buffer source-buf
                       (jj-diff-refresh))
                     (message "Successfully committed marked changes."))
                 (let ((err-out (buffer-string)))
-                  (error "jj split failed:\n%s" err-out)))))))))))
+                  (error "jj split failed:\n%s\nHint: Generated patch preserved at %s for inspection"
+                         err-out patch-file)))))))))))
 
 ;;; Keymap & Major Mode
 
@@ -1275,6 +1352,8 @@ With optional prefix ARG (OTHER-WINDOW), open in another window."
     (define-key map (kbd "c") #'jj-diff-commit-or-tool-apply)
     (define-key map (kbd "C-c C-c") #'jj-diff-commit-or-tool-apply)
     (define-key map (kbd "C-c C-k") #'jj-diff-tool-cancel)
+    (define-key map (kbd "C-c C-p") #'jj-diff-show-patch)
+    (define-key map (kbd "v") #'jj-diff-show-patch)
     (define-key map (kbd "g") #'jj-diff-refresh)
     (define-key map (kbd "q") #'jj-diff-quit)
     (define-key map (kbd "?") #'describe-mode)
@@ -1292,6 +1371,32 @@ With optional prefix ARG (OTHER-WINDOW), open in another window."
 ;;; User-Facing Entry Points
 
 ;;;###autoload
+(defun jj-diff-show-patch ()
+  "Display the unified diff patch for currently marked changes in a preview buffer."
+  (interactive)
+  (let* ((source-buf (or (and (derived-mode-p 'jj-diff-mode) (current-buffer))
+                         (and (boundp 'jj-diff--source-buffer) jj-diff--source-buffer)))
+         (files (when (and source-buf (buffer-live-p source-buf))
+                  (with-current-buffer source-buf jj-diff--files)))
+         (patch (if files
+                    (with-current-buffer source-buf
+                      (jj-diff--generate-selected-patch files))
+                  "")))
+    (if (string-empty-p (string-trim patch))
+        (message "No marked changes to preview.")
+      (let ((buf (get-buffer-create "*jj-diff: patch preview*")))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert patch)
+            (if (fboundp 'diff-mode)
+                (diff-mode)
+              (special-mode))
+            (setq buffer-read-only t)
+            (goto-char (point-min))))
+        (pop-to-buffer buf)))))
+
+;;;###autoload
 (defun jj-diff-refresh ()
   "Refresh the current `jj-diff` buffer."
   (interactive)
@@ -1299,7 +1404,9 @@ With optional prefix ARG (OTHER-WINDOW), open in another window."
     (setq jj-diff--repo-root (jj-diff--find-repo-root)))
   (unless jj-diff--repo-root
     (user-error "Not in a Jujutsu repository"))
-  (let* ((raw-diff (jj-diff--run-command (list "-R" jj-diff--repo-root
+  (let* ((raw-diff (jj-diff--run-command (list "--color=never"
+                                              "--no-pager"
+                                              "-R" jj-diff--repo-root
                                               "diff"
                                               "-r" (or jj-diff--revision "@")
                                               "--git")
