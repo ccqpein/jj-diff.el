@@ -1053,6 +1053,7 @@ RIGHT is the target split directory ($right)."
         (when (file-exists-p patch-file)
           (delete-file patch-file))))
     (message "Applied %d marked change line(s)." marked-count)
+    (set-buffer-modified-p nil)
     (kill-buffer cur-buf)
     ;; If running inside a dedicated terminal frame created by emacsclient -t, close it
     (when (and (frame-live-p frame)
@@ -1064,11 +1065,12 @@ RIGHT is the target split directory ($right)."
   (interactive)
   (let ((frame jj-diff--tool-frame)
         (cur-buf (current-buffer)))
+    (set-buffer-modified-p nil)
     (kill-buffer cur-buf)
     (when (and (frame-live-p frame)
                (> (length (frame-list)) 1))
       (delete-frame frame t))
-    (user-error "Split canceled")))
+    (message "Split canceled.")))
 
 (defun jj-diff--batch-apply (left right patch-file)
   "Batch entry point executed by Emacs when invoked as `jj split --tool` diff-editor.
@@ -1123,9 +1125,17 @@ PATCH-FILE is the path to the selected unified diff patch."
   "Major mode for editing Jujutsu commit descriptions."
   (setq-local header-line-format
               (propertize " Press C-c C-c to save/commit, C-c C-k to cancel without committing."
-                          'face 'jj-diff-status-bar))
-  (when (fboundp 'with-editor-mode)
-    (with-editor-mode 1)))
+                          'face 'jj-diff-status-bar)))
+
+;; Configure server to recognize Jujutsu commit description temp files
+(with-eval-after-load 'server
+  (unless (and (boundp 'server-temp-file-regexp)
+               (string-match-p "\\.jjdescription" server-temp-file-regexp))
+    (setq server-temp-file-regexp
+          (concat (if (boundp 'server-temp-file-regexp) server-temp-file-regexp "\\`/tmp/Re\\|/draft\\'")
+                  "\\|\\.jjdescription\\'"
+                  "\\|/editor-[^/]+\\'"
+                  "\\|/jj-description-[^/]+\\'"))))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.jjdescription\\'" . jj-describe-mode))
@@ -1151,6 +1161,7 @@ PATCH-FILE is the path to the selected unified diff patch."
           (insert (format "# Commit %d marked change line(s) via `jj split`\n" marked-count))
           (insert "# Lines starting with '#' will be ignored.\n")
           (insert "# Type message above and press C-c C-c to commit.\n")
+          (set-buffer-modified-p nil)
           (goto-char (point-min)))
         (pop-to-buffer desc-buf)))))
 
@@ -1159,60 +1170,56 @@ PATCH-FILE is the path to the selected unified diff patch."
 When invoked from an external Jujutsu emacsclient session, sends an error signal
 and deletes the temporary description file so Jujutsu aborts without committing."
   (interactive)
-  (if (and (fboundp 'with-editor-cancel) (boundp 'with-editor-mode) with-editor-mode)
-      (with-editor-cancel nil)
-    (if buffer-file-name
-        (let ((clients (or (and (boundp 'server-buffer-clients) (copy-sequence server-buffer-clients))
-                           (and (boundp 'server-clients) (copy-sequence server-clients))))
-              (frame (selected-frame))
-              (file buffer-file-name)
-              (cur-buf (current-buffer)))
-          ;; 1. Detach server-buffer-clients so kill-buffer-hook won't trigger server-buffer-done
-          (setq-local server-buffer-clients nil)
-          ;; 2. Erase buffer and delete the temp description file
-          (erase-buffer)
-          (set-buffer-modified-p nil)
-          (ignore-errors (delete-file file))
-          ;; 3. Signal abort error to emacsclient process so it exits with non-zero code
-          (dolist (proc clients)
-            (when (process-live-p proc)
-              (ignore-errors
-                (server-send-string proc "-error Aborted by user\n")
-                (server-delete-client proc))))
-          ;; 4. Close dedicated frame if applicable
-          (when (and (frame-live-p frame) (> (length (frame-list)) 1))
-            (delete-frame frame t))
-          (ignore-errors (kill-buffer cur-buf))
-          (message "Commit description canceled."))
-      (let ((desc-buf (current-buffer)))
-        (quit-window t (get-buffer-window desc-buf))
-        (message "Commit canceled.")))))
+  (if buffer-file-name
+      (let ((clients (or (and (boundp 'server-buffer-clients) (copy-sequence server-buffer-clients))
+                         (and (boundp 'server-clients) (copy-sequence server-clients))))
+            (frame (selected-frame))
+            (file buffer-file-name)
+            (cur-buf (current-buffer)))
+        ;; 1. Detach server-buffer-clients so kill-buffer-hook won't trigger server-buffer-done
+        (setq-local server-buffer-clients nil)
+        ;; 2. Erase buffer and delete the temp description file
+        (erase-buffer)
+        (set-buffer-modified-p nil)
+        (ignore-errors (delete-file file))
+        ;; 3. Signal abort error to emacsclient process so it exits with non-zero code
+        (dolist (proc clients)
+          (when (process-live-p proc)
+            (ignore-errors
+              (server-send-string proc "-error Aborted by user\n")
+              (server-delete-client proc))))
+        ;; 4. Close dedicated frame if applicable
+        (when (and (frame-live-p frame) (> (length (frame-list)) 1))
+          (delete-frame frame t))
+        (ignore-errors (kill-buffer cur-buf))
+        (message "Commit description canceled."))
+    (let ((desc-buf (current-buffer)))
+      (set-buffer-modified-p nil)
+      (quit-window t (get-buffer-window desc-buf))
+      (message "Commit canceled."))))
 
 (defun jj-diff-commit-apply ()
   "Apply commit description and finish editing.
 Handles both internal diff buffers and external Jujutsu server files."
   (interactive)
-  (if (and (fboundp 'with-editor-finish) (boundp 'with-editor-mode) with-editor-mode)
-      (with-editor-finish nil)
-    (if buffer-file-name
-        ;; External file from Jujutsu editor (e.g. .jjdescription via emacsclient)
-        (let ((frame (selected-frame)))
-          (save-buffer)
-          (if (and (fboundp 'server-edit)
-                   (boundp 'server-buffer-clients)
-                   server-buffer-clients)
-              (server-edit)
-            (quit-window t (selected-window)))
-          (when (and (frame-live-p frame) (> (length (frame-list)) 1))
-            (delete-frame frame t)))
+  (if buffer-file-name
+      ;; External file from Jujutsu editor (e.g. .jjdescription via emacsclient)
+      (let ((frame (selected-frame)))
+        (save-buffer)
+        (set-buffer-modified-p nil)
+        (if (and (fboundp 'server-edit)
+                 (boundp 'server-buffer-clients)
+                 server-buffer-clients)
+            (server-edit)
+          (quit-window t (selected-window)))
+        (when (and (frame-live-p frame) (> (length (frame-list)) 1))
+          (delete-frame frame t)))
     ;; Internal jj-diff session
     (let* ((desc-raw (buffer-substring-no-properties (point-min) (point-max)))
            (desc-lines (cl-remove-if (lambda (l) (string-prefix-p "#" (string-trim l)))
-                                    (split-string desc-raw "\n")))
+                                     (split-string desc-raw "\n")))
            (message-text (string-trim (mapconcat #'identity desc-lines "\n")))
            (source-buf jj-diff--source-buffer))
-      (when (string-empty-p message-text)
-        (user-error "Commit message cannot be empty"))
       (unless (and source-buf (buffer-live-p source-buf))
         (user-error "Source diff buffer is no longer available"))
       (let* ((repo-root (with-current-buffer source-buf jj-diff--repo-root))
@@ -1255,13 +1262,14 @@ Handles both internal diff buffers and external Jujutsu server files."
               (if (zerop exit-code)
                   (progn
                     (delete-file patch-file)
+                    (set-buffer-modified-p nil)
                     (quit-window t (selected-window))
                     (with-current-buffer source-buf
                       (jj-diff-refresh))
                     (message "Successfully committed marked changes."))
                 (let ((err-out (buffer-string)))
                   (error "jj split failed:\n%s\nHint: Generated patch preserved at %s for inspection"
-                         err-out patch-file)))))))))))
+                         err-out patch-file))))))))))
 
 ;;; Keymap & Major Mode
 
@@ -1325,7 +1333,14 @@ With optional prefix ARG (OTHER-WINDOW), open in another window."
   (if jj-diff--tool-mode
       (when (y-or-n-p "Cancel interactive split / diff-editor session? ")
         (jj-diff-tool-cancel))
-    (quit-window)))
+    (quit-window t)))
+
+(defun jj-diff-cancel ()
+  "Cancel current diff operation or quit buffer without confirmation."
+  (interactive)
+  (if jj-diff--tool-mode
+      (jj-diff-tool-cancel)
+    (quit-window t)))
 
 (defvar jj-diff-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1351,7 +1366,7 @@ With optional prefix ARG (OTHER-WINDOW), open in another window."
     (define-key map (kbd "P") #'jj-diff-prev-file)
     (define-key map (kbd "c") #'jj-diff-commit-or-tool-apply)
     (define-key map (kbd "C-c C-c") #'jj-diff-commit-or-tool-apply)
-    (define-key map (kbd "C-c C-k") #'jj-diff-tool-cancel)
+    (define-key map (kbd "C-c C-k") #'jj-diff-cancel)
     (define-key map (kbd "C-c C-p") #'jj-diff-show-patch)
     (define-key map (kbd "v") #'jj-diff-show-patch)
     (define-key map (kbd "g") #'jj-diff-refresh)

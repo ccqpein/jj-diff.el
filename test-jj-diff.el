@@ -974,5 +974,69 @@
             (should (string-match-p "\\+new" (buffer-string))))
           (when buf (kill-buffer buf)))))))
 
+(ert-deftest jj-diff-test-commit-buf-initially-unmodified ()
+  "Test that the commit description buffer starts with buffer-modified-p nil."
+  (let ((diff-str (concat "diff --git a/test.txt b/test.txt\n"
+                          "--- a/test.txt\n"
+                          "+++ b/test.txt\n"
+                          "@@ -1,1 +1,1 @@\n"
+                          "-old\n"
+                          "+new\n")))
+    (let ((diff-buf (get-buffer-create "*jj-diff-test-unmod*"))
+          (desc-buf (get-buffer-create "*jj-commit-description*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer diff-buf
+              (jj-diff-mode)
+              (setq jj-diff--files (jj-diff--parse-unified-diff diff-str))
+              (jj-diff--render-buffer)
+              (goto-char (point-min))
+              (search-forward "+new")
+              (jj-diff-mark)
+              (jj-diff-commit))
+            (with-current-buffer desc-buf
+              (should-not (buffer-modified-p))
+              ;; Test C-c C-k cancel cleans up
+              (jj-diff-commit-cancel)
+              (should-not (get-buffer-window desc-buf))))
+        (when (buffer-live-p diff-buf) (kill-buffer diff-buf))
+        (when (buffer-live-p desc-buf) (kill-buffer desc-buf))))))
+
+(ert-deftest jj-diff-test-e2e-empty-message-split ()
+  "Test that splitting with an empty commit description commits successfully."
+  (let* ((temp-dir (make-temp-file "jj-diff-empty-msg-e2e-" t))
+         (file-path (expand-file-name "test.txt" temp-dir)))
+    (unwind-protect
+        (progn
+          (should (zerop (call-process "jj" nil nil nil "git" "init" temp-dir)))
+          (with-temp-file file-path (insert "line 1\nline 2\n"))
+          (should (zerop (call-process "jj" nil nil nil "-R" temp-dir "commit" "-m" "init")))
+          (with-temp-file file-path (insert "line 1 mod\nline 2\n"))
+
+          (let ((diff-buf (get-buffer-create "*jj-diff-test-empty-msg*"))
+                (desc-buf (get-buffer-create "*jj-commit-description*")))
+            (with-current-buffer diff-buf
+              (jj-diff-mode)
+              (setq default-directory (file-name-as-directory temp-dir))
+              (setq jj-diff--repo-root temp-dir)
+              (setq jj-diff--revision "@")
+              (jj-diff-refresh)
+              (should (> (length jj-diff--files) 0))
+
+              (goto-char (point-min))
+              (search-forward "+line 1 mod")
+              (jj-diff-mark)
+              (should (= (jj-diff-count-marked-lines) 1))
+              (jj-diff-commit))
+
+            ;; Leave commit description empty (only comments) and commit
+            (with-current-buffer desc-buf
+              (jj-diff-commit-apply))
+
+            (with-temp-buffer
+              (should (zerop (call-process "jj" nil t nil "-R" temp-dir "diff" "-r" "@-")))
+              (should (string-match-p "line 1 mod" (buffer-string))))))
+      (delete-directory temp-dir t))))
+
 (provide 'test-jj-diff)
 ;;; test-jj-diff.el ends here
